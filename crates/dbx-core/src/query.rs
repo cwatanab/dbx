@@ -192,16 +192,20 @@ pub async fn do_execute_with_row_limit(
             let p = p.clone();
             let bare = *mode == crate::connection::MysqlMode::Bare;
             drop(connections);
-            wait_for_query(cancel_token, db::mysql::execute_query(&p, sql, bare)).await
+            wait_for_query(cancel_token, db::mysql::execute_query_with_row_limit(&p, sql, bare, row_limit)).await
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
             let schema = schema.map(|s| s.to_string());
             drop(connections);
             if let Some(schema) = schema {
-                wait_for_query(cancel_token, db::postgres::execute_query_with_schema(&p, &schema, sql)).await
+                wait_for_query(
+                    cancel_token,
+                    db::postgres::execute_query_with_schema_and_row_limit(&p, &schema, sql, row_limit),
+                )
+                .await
             } else {
-                wait_for_query(cancel_token, db::postgres::execute_query(&p, sql)).await
+                wait_for_query(cancel_token, db::postgres::execute_query_with_row_limit(&p, sql, row_limit)).await
             }
         }
         PoolKind::Sqlite(p) => {
@@ -832,6 +836,15 @@ mod tests {
 
         assert_eq!(result.rows.len(), 1);
         assert!(result.truncated);
+    }
+
+    #[test]
+    fn mysql_and_postgres_pool_branches_call_limit_aware_drivers() {
+        let source = include_str!("query.rs");
+
+        assert!(source.contains("db::mysql::execute_query_with_row_limit(&p, sql, bare, row_limit)"));
+        assert!(source.contains("db::postgres::execute_query_with_schema_and_row_limit(&p, &schema, sql, row_limit)"));
+        assert!(source.contains("db::postgres::execute_query_with_row_limit(&p, sql, row_limit)"));
     }
 
     #[tokio::test]
