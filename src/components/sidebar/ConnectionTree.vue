@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Search, X, ListFilter, Check, FolderPlus } from "lucide-vue-next";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { TreeNode } from "@/types/database";
-import { matchSidebarLabel } from "@/lib/sidebarSearch";
+import { filterSidebarTree } from "@/lib/sidebarSearchTree";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
 import {
   SIDEBAR_TREE_ROW_HEIGHT,
@@ -90,54 +90,6 @@ function clearTypeFilter() {
   selectedTypes.value = [];
 }
 
-const normalizedLabelCache = new WeakMap<TreeNode, { label: string; normalized: string }>();
-
-function normalizedLabel(node: TreeNode): string {
-  const cached = normalizedLabelCache.get(node);
-  if (cached?.label === node.label) return cached.normalized;
-
-  const normalized = node.label.toLowerCase();
-  normalizedLabelCache.set(node, { label: node.label, normalized });
-  return normalized;
-}
-
-function filterTree(nodes: TreeNode[], q: string): TreeNode[] {
-  const filteredNodes: { node: TreeNode; score: number }[] = [];
-
-  for (const node of nodes) {
-    if (node.type === "object-browser" && node.hiddenChildren) {
-      const matches = node.hiddenChildren
-        .map((child) => ({ node: child, score: matchSidebarLabel(normalizedLabel(child), q)?.score ?? 0 }))
-        .filter((m) => m.score > 0);
-      filteredNodes.push(...matches);
-      continue;
-    }
-
-    const label = normalizedLabel(node);
-    const selfMatch = matchSidebarLabel(label, q);
-    const filteredChildren = node.children ? filterTree(node.children, q) : undefined;
-
-    if (selfMatch || (filteredChildren && filteredChildren.length > 0)) {
-      if (!node.children) {
-        filteredNodes.push({ node, score: selfMatch?.score ?? 0 });
-      } else {
-        const children = filteredChildren ?? [];
-        filteredNodes.push({
-          node: {
-            ...node,
-            children,
-            isExpanded: children.length > 0 && !searchCollapsedIds.value.has(node.id),
-          },
-          score: selfMatch?.score ?? 0,
-        });
-      }
-    }
-  }
-
-  filteredNodes.sort((a, b) => b.score - a.score);
-  return filteredNodes.map((m) => m.node);
-}
-
 function matchesType(node: TreeNode): boolean {
   if (node.type === "connection-group") {
     return node.children?.some(matchesType) ?? false;
@@ -163,7 +115,7 @@ const filteredNodes = computed(() => {
 
   const q = deferredSearchQuery.value;
   if (q) {
-    nodes = filterTree(nodes, q);
+    nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value);
   }
 
   return nodes;
