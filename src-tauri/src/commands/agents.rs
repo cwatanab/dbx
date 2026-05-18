@@ -36,6 +36,7 @@ const AGENT_TYPES: &[(&str, &str)] = &[
     ("kylin", "Apache Kylin"),
     ("sundb", "SunDB"),
     ("gaussdb", "GaussDB"),
+    ("yashandb", "崖山 YashanDB"),
     ("tdengine", "TDengine"),
     ("mongodb", "MongoDB (Legacy)"),
 ];
@@ -112,6 +113,7 @@ mod tests {
         let agents = build_agent_list(&manager, None);
 
         assert!(agents.iter().any(|agent| agent.db_type == "tdengine" && agent.label == "TDengine"));
+        assert!(agents.iter().any(|agent| agent.db_type == "yashandb" && agent.label == "崖山 YashanDB"));
         assert!(agents.iter().any(|agent| agent.db_type == "access" && agent.label == "Microsoft Access"));
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -194,6 +194,7 @@ export const useConnectionStore = defineStore("connection", () => {
       gaussdb: "GaussDB",
       kingbase: "KingBase",
       highgo: "瀚高 HighGo",
+      yashandb: "崖山 YashanDB",
       vastbase: "Vastbase",
       goldendb: "GoldenDB",
       access: "Microsoft Access",

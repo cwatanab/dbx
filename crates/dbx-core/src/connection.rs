@@ -232,6 +232,7 @@ impl AppState {
             | DatabaseType::Highgo
             | DatabaseType::Vastbase
             | DatabaseType::Goldendb
+            | DatabaseType::Yashandb
             | DatabaseType::Oracle
             | DatabaseType::H2
             | DatabaseType::Snowflake

@@ -7,6 +7,7 @@ pub fn agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option
         DatabaseType::Highgo => Some("highgo"),
         DatabaseType::Vastbase => Some("vastbase"),
         DatabaseType::Goldendb => Some("goldendb"),
+        DatabaseType::Yashandb => Some("yashandb"),
         DatabaseType::Oracle => match driver_profile {
             Some("oracle-10g") => Some("oracle-10g"),
             _ => Some("oracle"),
@@ -45,6 +46,7 @@ pub fn is_single_connection_pool(db_type: &DatabaseType) -> bool {
             | DatabaseType::Highgo
             | DatabaseType::Vastbase
             | DatabaseType::Goldendb
+            | DatabaseType::Yashandb
             | DatabaseType::Access
             | DatabaseType::Jdbc
     )

@@ -128,6 +128,7 @@ pub enum DatabaseType {
     Vastbase,
     Goldendb,
     Gaussdb,
+    Yashandb,
     Access,
     #[serde(rename = "h2")]
     H2,
@@ -175,6 +176,7 @@ impl ConnectionConfig {
             DatabaseType::Gaussdb => Some("postgres"),
             DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
+            DatabaseType::Yashandb => Some("yasdb"),
             _ => None,
         }
     }
@@ -267,6 +269,7 @@ impl ConnectionConfig {
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
             DatabaseType::Gaussdb => format!("gaussdb://{host}:{port}{db_part}"),
+            DatabaseType::Yashandb => format!("yashandb://{host}:{port}{db_part}"),
             DatabaseType::H2 => format!("h2://{host}:{port}{db_part}"),
             DatabaseType::Snowflake => format!("snowflake://{host}/{db_part}"),
             DatabaseType::Trino => format!("trino://{host}:{port}{db_part}"),
@@ -365,6 +368,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Gaussdb => {
                 format!("gaussdb://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Yashandb => {
+                format!("yashandb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::H2 => {
                 format!("h2://{}:{}@{host}:{port}{db_part}", username, password)
@@ -814,6 +820,14 @@ mod tests {
         config.db_type = DatabaseType::Gaussdb;
 
         assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@10.1.2.3:2883/postgres");
+    }
+
+    #[test]
+    fn yashandb_url_defaults_to_yasdb_database() {
+        let mut config = mysql_config("sys", "secret", None);
+        config.db_type = DatabaseType::Yashandb;
+
+        assert_eq!(config.connection_url(), "yashandb://sys:secret@10.1.2.3:2883/yasdb");
     }
 
     #[test]

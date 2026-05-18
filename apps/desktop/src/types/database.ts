@@ -18,6 +18,7 @@ export type DatabaseType =
   | "highgo"
   | "vastbase"
   | "goldendb"
+  | "yashandb"
   | "access"
   | "h2"
   | "snowflake"

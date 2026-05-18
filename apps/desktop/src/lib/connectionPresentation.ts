@@ -33,6 +33,7 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
 
     case "postgres":
     case "gaussdb":
+    case "yashandb":
     case "redshift":
       return "postgresql://user:password@host:port/database";
 

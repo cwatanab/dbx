@@ -29,6 +29,7 @@ const assetIcons: Record<string, string> = {
   kingbase: "kingbase",
   goldendb: "goldendb.png",
   vastbase: "vastbase.png",
+  yashandb: "yashandb.png",
   snowflake: "snowflake",
   h2: "h2",
   dm: "dm",

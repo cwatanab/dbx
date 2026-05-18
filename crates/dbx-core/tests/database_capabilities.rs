@@ -9,6 +9,7 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Hive, None), Some("hive"));
     assert_eq!(agent_key(&DatabaseType::Gaussdb, None), Some("gaussdb"));
     assert_eq!(agent_key(&DatabaseType::Tdengine, None), Some("tdengine"));
+    assert_eq!(agent_key(&DatabaseType::Yashandb, None), Some("yashandb"));
     assert_eq!(agent_key(&DatabaseType::Access, None), Some("access"));
     assert_eq!(agent_key(&DatabaseType::Oracle, None), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle-10g"));
@@ -21,6 +22,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Trino));
     assert!(is_agent_type(&DatabaseType::Hive));
     assert!(is_agent_type(&DatabaseType::Tdengine));
+    assert!(is_agent_type(&DatabaseType::Yashandb));
     assert!(is_agent_type(&DatabaseType::Access));
     assert!(!is_agent_type(&DatabaseType::Mysql));
     assert!(!is_agent_type(&DatabaseType::Jdbc));
@@ -33,6 +35,7 @@ fn identifies_single_connection_pool_types() {
     assert!(is_single_connection_pool(&DatabaseType::Oracle));
     assert!(is_single_connection_pool(&DatabaseType::Dameng));
     assert!(is_single_connection_pool(&DatabaseType::Access));
+    assert!(is_single_connection_pool(&DatabaseType::Yashandb));
     assert!(is_single_connection_pool(&DatabaseType::Jdbc));
     assert!(!is_single_connection_pool(&DatabaseType::Trino));
     assert!(!is_single_connection_pool(&DatabaseType::Postgres));
@@ -56,6 +59,7 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::Trino));
     assert!(skips_tcp_probe(&DatabaseType::Oracle));
     assert!(skips_tcp_probe(&DatabaseType::Tdengine));
+    assert!(skips_tcp_probe(&DatabaseType::Yashandb));
     assert!(!skips_tcp_probe(&DatabaseType::Postgres));
     assert!(!skips_tcp_probe(&DatabaseType::Mysql));
 }
