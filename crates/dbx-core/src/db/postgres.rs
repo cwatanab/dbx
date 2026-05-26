@@ -59,6 +59,68 @@ fn pg_system_u32_to_json(row: &Row, idx: usize) -> Option<serde_json::Value> {
     row.try_get::<_, PgSystemU32>(idx).ok().map(|v| pg_u32_number(v.0))
 }
 
+fn pg_optional_array_to_json<T>(
+    values: Vec<Option<T>>,
+    map_value: impl Fn(T) -> serde_json::Value,
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        values.into_iter().map(|value| value.map(&map_value).unwrap_or(serde_json::Value::Null)).collect(),
+    )
+}
+
+fn pg_float_number(v: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+}
+
+fn pg_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
+    if let Ok(values) = row.try_get::<_, Vec<Option<String>>>(idx) {
+        return Some(pg_optional_array_to_json(values, serde_json::Value::String));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<bool>>>(idx) {
+        return Some(pg_optional_array_to_json(values, serde_json::Value::Bool));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<Decimal>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.to_string())));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<uuid::Uuid>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.to_string())));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<DateTime<Utc>>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.to_rfc3339())));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<NaiveDateTime>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.to_string())));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<NaiveDate>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.to_string())));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<NaiveTime>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.to_string())));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<u32>>>(idx) {
+        return Some(pg_optional_array_to_json(values, pg_u32_number));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<i8>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::Number(v.into())));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<i16>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::Number(v.into())));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<i32>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::Number(v.into())));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<i64>>>(idx) {
+        return Some(pg_optional_array_to_json(values, super::safe_i64_to_json));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<f32>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| pg_float_number(v as f64)));
+    }
+    if let Ok(values) = row.try_get::<_, Vec<Option<f64>>>(idx) {
+        return Some(pg_optional_array_to_json(values, pg_float_number));
+    }
+    None
+}
+
 fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value {
     let upper = type_name.to_uppercase();
 
@@ -105,6 +167,10 @@ fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value
         return pg_system_u32_to_json(row, idx).unwrap_or(serde_json::Value::Null);
     }
 
+    if upper.starts_with('_') {
+        return pg_array_to_json_value(row, idx).unwrap_or(serde_json::Value::Null);
+    }
+
     row.try_get::<_, String>(idx)
         .map(serde_json::Value::String)
         .or_else(|e| pg_system_u32_to_json(row, idx).ok_or(e))
@@ -112,26 +178,7 @@ fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value
         .or_else(|_| row.try_get::<_, i32>(idx).map(|v| serde_json::Value::Number(v.into())))
         .or_else(|_| row.try_get::<_, i16>(idx).map(|v| serde_json::Value::Number(v.into())))
         .or_else(|_| row.try_get::<_, i8>(idx).map(|v| serde_json::Value::Number(v.into())))
-        .or_else(|_| {
-            row.try_get::<_, Vec<u32>>(idx)
-                .map(|v| serde_json::Value::Array(v.into_iter().map(pg_u32_number).collect()))
-        })
-        .or_else(|_| {
-            row.try_get::<_, Vec<i8>>(idx)
-                .map(|v| serde_json::Value::Array(v.into_iter().map(|v| serde_json::Value::Number(v.into())).collect()))
-        })
-        .or_else(|_| {
-            row.try_get::<_, Vec<i16>>(idx)
-                .map(|v| serde_json::Value::Array(v.into_iter().map(|v| serde_json::Value::Number(v.into())).collect()))
-        })
-        .or_else(|_| {
-            row.try_get::<_, Vec<i32>>(idx)
-                .map(|v| serde_json::Value::Array(v.into_iter().map(|v| serde_json::Value::Number(v.into())).collect()))
-        })
-        .or_else(|_| {
-            row.try_get::<_, Vec<i64>>(idx)
-                .map(|v| serde_json::Value::Array(v.into_iter().map(|v| serde_json::Value::Number(v.into())).collect()))
-        })
+        .or_else(|e| pg_array_to_json_value(row, idx).ok_or(e))
         .or_else(|_| {
             row.try_get::<_, f64>(idx).map(|v| {
                 serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
@@ -852,6 +899,16 @@ mod tests {
         assert!(PgSystemU32::accepts(&Type::CID));
         assert!(!PgSystemU32::accepts(&Type::OID));
         assert!(!PgSystemU32::accepts(&Type::INT4));
+    }
+
+    #[test]
+    fn pg_optional_array_to_json_preserves_text_values_and_nulls() {
+        let value = pg_optional_array_to_json(
+            vec![Some("productManager".to_string()), None, Some("projectOwner".to_string())],
+            serde_json::Value::String,
+        );
+
+        assert_eq!(value, serde_json::json!(["productManager", null, "projectOwner"]));
     }
 
     #[test]
