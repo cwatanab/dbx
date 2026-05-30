@@ -154,11 +154,11 @@ function onToolbarDblClick(e: MouseEvent) {
       @click="emit('open-driver-store')"
     >
       <Package class="h-3.5 w-3.5" />
-      驱动管理
+      {{ t("toolbar.driverManager") }}
       <span
         v-if="agentDriverUpdateCount > 0"
         class="ml-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white"
-        aria-label="可更新驱动数量"
+        :aria-label="t('toolbar.updatableDriverCount')"
       >
         {{ agentDriverUpdateCount > 99 ? "99+" : agentDriverUpdateCount }}
       </span>

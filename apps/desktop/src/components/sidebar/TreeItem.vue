@@ -1806,6 +1806,7 @@ const showDropInside = computed(
 );
 const isDragging = computed(() => dragState.active && dragState.draggedId === props.node.id);
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
+const TABLE_REFERENCE_DRAGGING_CLASS = "dbx-table-reference-dragging";
 const canDragTableReference = computed(
   () =>
     !props.dragDisabled &&
@@ -1837,16 +1838,16 @@ function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
 function startTableReferenceDrag(payload: QueryEditorTableReferencePayload) {
   draggingTableReferencePayload = payload;
   setActiveTableReferencePayload(payload);
+  document.getSelection()?.removeAllRanges();
   document.body.style.cursor = "copy";
-  document.body.style.userSelect = "none";
 }
 
 function finishTableReferenceDrag() {
   clearActiveTableReferencePayload(draggingTableReferencePayload);
   pendingTableReferenceDrag = null;
   draggingTableReferencePayload = null;
+  document.body.classList.remove(TABLE_REFERENCE_DRAGGING_CLASS);
   document.body.style.cursor = "";
-  document.body.style.userSelect = "";
   document.removeEventListener("mousemove", onTableReferenceMouseMove, true);
   document.removeEventListener("mouseup", onTableReferenceMouseUp, true);
 }
@@ -1861,6 +1862,7 @@ function onTableReferenceMouseMove(event: MouseEvent) {
   }
   if (draggingTableReferencePayload) {
     event.preventDefault();
+    document.getSelection()?.removeAllRanges();
   }
 }
 
@@ -1886,6 +1888,9 @@ function startTableReferenceMouseDrag(event: MouseEvent) {
   if (event.button !== 0) return;
   const payload = tableReferenceDragPayload();
   if (!payload) return;
+  event.preventDefault();
+  document.getSelection()?.removeAllRanges();
+  document.body.classList.add(TABLE_REFERENCE_DRAGGING_CLASS);
   pendingTableReferenceDrag = { payload, startX: event.clientX, startY: event.clientY };
   document.addEventListener("mousemove", onTableReferenceMouseMove, true);
   document.addEventListener("mouseup", onTableReferenceMouseUp, true);

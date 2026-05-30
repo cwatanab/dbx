@@ -390,41 +390,41 @@ const WINDOW_FUNCTIONS = new Set([
 function getFunctionDescriptions(t?: SqlCompletionTranslations): Map<string, string> {
   const d = t?.functionDescriptions ?? {};
   return new Map<string, string>([
-    ["COUNT", d.COUNT || "返回行数"],
-    ["SUM", d.SUM || "返回数值列的总和"],
-    ["AVG", d.AVG || "返回数值列的平均值"],
-    ["MIN", d.MIN || "返回最小值"],
-    ["MAX", d.MAX || "返回最大值"],
-    ["GROUP_CONCAT", d.GROUP_CONCAT || "将分组中的值连接为字符串"],
-    ["STRING_AGG", d.STRING_AGG || "将分组中的字符串连接起来"],
-    ["CONCAT", d.CONCAT || "连接多个字符串"],
-    ["CONCAT_WS", d.CONCAT_WS || "使用分隔符连接多个字符串"],
-    ["SUBSTRING", d.SUBSTRING || "提取子字符串"],
-    ["REPLACE", d.REPLACE || "替换字符串中的内容"],
-    ["TRIM", d.TRIM || "去除首尾空格"],
-    ["UPPER", d.UPPER || "转换为大写"],
-    ["LOWER", d.LOWER || "转换为小写"],
-    ["LENGTH", d.LENGTH || "返回字符串长度"],
-    ["REGEXP_REPLACE", d.REGEXP_REPLACE || "使用正则表达式替换"],
-    ["DATE_FORMAT", d.DATE_FORMAT || "按指定格式格式化日期"],
-    ["DATEDIFF", d.DATEDIFF || "计算两个日期的差值"],
-    ["DATE_ADD", d.DATE_ADD || "对日期进行加法运算"],
-    ["DATE_SUB", d.DATE_SUB || "对日期进行减法运算"],
-    ["EXTRACT", d.EXTRACT || "提取日期中的指定部分"],
-    ["NOW", d.NOW || "返回当前日期时间"],
-    ["ROUND", d.ROUND || "四舍五入到指定小数位"],
-    ["FLOOR", d.FLOOR || "向下取整"],
-    ["CEIL", d.CEIL || "向上取整"],
-    ["ABS", d.ABS || "返回绝对值"],
-    ["MOD", d.MOD || "返回除法余数"],
-    ["COALESCE", d.COALESCE || "返回第一个非 NULL 的参数"],
-    ["IFNULL", d.IFNULL || "如果为 NULL 则返回替代值"],
-    ["NULLIF", d.NULLIF || "如果相等则返回 NULL"],
-    ["CAST", d.CAST || "将表达式转换为指定类型"],
-    ["JSON_EXTRACT", d.JSON_EXTRACT || "从 JSON 中提取值"],
-    ["JSON_VALUE", d.JSON_VALUE || "从 JSON 中提取标量值"],
-    ["JSON_OBJECT", d.JSON_OBJECT || "创建 JSON 对象"],
-    ["JSON_ARRAY", d.JSON_ARRAY || "创建 JSON 数组"],
+    ["COUNT", d.COUNT || "Returns the number of rows"],
+    ["SUM", d.SUM || "Returns the sum of a numeric column"],
+    ["AVG", d.AVG || "Returns the average of a numeric column"],
+    ["MIN", d.MIN || "Returns the minimum value"],
+    ["MAX", d.MAX || "Returns the maximum value"],
+    ["GROUP_CONCAT", d.GROUP_CONCAT || "Concatenates group values into a string"],
+    ["STRING_AGG", d.STRING_AGG || "Concatenates strings in a group"],
+    ["CONCAT", d.CONCAT || "Concatenates multiple strings"],
+    ["CONCAT_WS", d.CONCAT_WS || "Concatenates strings with a separator"],
+    ["SUBSTRING", d.SUBSTRING || "Extracts a substring"],
+    ["REPLACE", d.REPLACE || "Replaces content in a string"],
+    ["TRIM", d.TRIM || "Removes leading and trailing spaces"],
+    ["UPPER", d.UPPER || "Converts to uppercase"],
+    ["LOWER", d.LOWER || "Converts to lowercase"],
+    ["LENGTH", d.LENGTH || "Returns string length"],
+    ["REGEXP_REPLACE", d.REGEXP_REPLACE || "Replaces using a regular expression"],
+    ["DATE_FORMAT", d.DATE_FORMAT || "Formats a date with a pattern"],
+    ["DATEDIFF", d.DATEDIFF || "Calculates the difference between two dates"],
+    ["DATE_ADD", d.DATE_ADD || "Adds to a date"],
+    ["DATE_SUB", d.DATE_SUB || "Subtracts from a date"],
+    ["EXTRACT", d.EXTRACT || "Extracts a part from a date"],
+    ["NOW", d.NOW || "Returns the current date and time"],
+    ["ROUND", d.ROUND || "Rounds to the specified precision"],
+    ["FLOOR", d.FLOOR || "Rounds down"],
+    ["CEIL", d.CEIL || "Rounds up"],
+    ["ABS", d.ABS || "Returns the absolute value"],
+    ["MOD", d.MOD || "Returns the remainder"],
+    ["COALESCE", d.COALESCE || "Returns the first non-NULL argument"],
+    ["IFNULL", d.IFNULL || "Returns an alternate value when NULL"],
+    ["NULLIF", d.NULLIF || "Returns NULL when values are equal"],
+    ["CAST", d.CAST || "Converts an expression to a specified type"],
+    ["JSON_EXTRACT", d.JSON_EXTRACT || "Extracts a value from JSON"],
+    ["JSON_VALUE", d.JSON_VALUE || "Extracts a scalar value from JSON"],
+    ["JSON_OBJECT", d.JSON_OBJECT || "Creates a JSON object"],
+    ["JSON_ARRAY", d.JSON_ARRAY || "Creates a JSON array"],
   ]);
 }
 
@@ -1527,7 +1527,7 @@ function buildStarExpansionItem(
   return {
     label: "* → columns",
     type: "snippet" as const,
-    detail: `${(t?.starExpansionColumns ?? "{count} 列").replace("{count}", String(allColumns.length))}: ${expansion.length > 60 ? expansion.slice(0, 57) + "..." : expansion}`,
+    detail: `${(t?.starExpansionColumns ?? "{count} columns").replace("{count}", String(allColumns.length))}: ${expansion.length > 60 ? expansion.slice(0, 57) + "..." : expansion}`,
     apply: expansion,
     boost: 1900,
   };
@@ -1580,19 +1580,19 @@ function buildComparisonValueItems(
   items.push({
     label: "NULL",
     type: "keyword" as const,
-    detail: t?.nullValue ?? "空值",
+    detail: t?.nullValue ?? "NULL value",
     boost: 1300,
   });
   items.push({
     label: "IS NULL",
     type: "keyword" as const,
-    detail: t?.isNull ?? "判断是否为 NULL",
+    detail: t?.isNull ?? "Checks whether the value is NULL",
     boost: 1250,
   });
   items.push({
     label: "IS NOT NULL",
     type: "keyword" as const,
-    detail: t?.isNotNull ?? "判断是否不为 NULL",
+    detail: t?.isNotNull ?? "Checks whether the value is not NULL",
     boost: 1200,
   });
 
@@ -1607,7 +1607,7 @@ function buildComparisonValueItems(
       items.push({
         label: "''",
         type: "snippet" as const,
-        detail: t?.stringLiteral ?? "字符串字面量",
+        detail: t?.stringLiteral ?? "String literal",
         apply: "'${value}'",
         boost: 1800,
       });
@@ -1630,7 +1630,7 @@ function buildComparisonValueItems(
       items.push({
         label: "0",
         type: "snippet" as const,
-        detail: t?.numericLiteral ?? "数值字面量",
+        detail: t?.numericLiteral ?? "Numeric literal",
         apply: "${1:value}",
         boost: 1750,
       });
@@ -1640,8 +1640,8 @@ function buildComparisonValueItems(
   // Boolean-ish: tinyint or bit
   if (dt === "bit" || dt === "boolean" || dt === "bool") {
     items.push(
-      { label: "TRUE", type: "keyword" as const, detail: t?.booleanValue ?? "布尔值", boost: 1700 },
-      { label: "FALSE", type: "keyword" as const, detail: t?.booleanValue ?? "布尔值", boost: 1650 },
+      { label: "TRUE", type: "keyword" as const, detail: t?.booleanValue ?? "Boolean value", boost: 1700 },
+      { label: "FALSE", type: "keyword" as const, detail: t?.booleanValue ?? "Boolean value", boost: 1650 },
     );
   }
 

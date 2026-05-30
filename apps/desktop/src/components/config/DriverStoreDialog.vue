@@ -66,8 +66,8 @@ const installedJres = computed(() => {
 const progressText = computed(() => {
   const p = progress.value;
   if (!p) return "";
-  if (p.step === "jre-extract") return "解压 JRE...";
-  const label = p.step === "jre" ? "下载 JRE" : "下载驱动";
+  if (p.step === "jre-extract") return t("driverStore.progressJreExtract");
+  const label = p.step === "jre" ? t("driverStore.progressDownloadJre") : t("driverStore.progressDownloadDriver");
   if (!p.total) return `${label}...`;
   const pct = Math.round(((p.downloaded ?? 0) / p.total) * 100);
   const dl = formatSize(p.downloaded ?? 0);
@@ -86,11 +86,11 @@ const usageSummary = computed(() => {
   const usage = driverStoreUsage.value;
   if (!usage) return [];
   return [
-    { key: "total", label: "总计", bytes: usage.total_bytes },
-    { key: "jre", label: "托管 JRE", bytes: usage.jre_bytes },
-    { key: "agent", label: "内置驱动 Agent", bytes: usage.agent_driver_bytes },
-    { key: "jdbc-plugin", label: "JDBC 插件", bytes: usage.jdbc_plugin_bytes },
-    { key: "jdbc-driver", label: "JDBC 驱动 JAR", bytes: usage.jdbc_driver_bytes },
+    { key: "total", label: t("driverStore.usageTotalLabel"), bytes: usage.total_bytes },
+    { key: "jre", label: t("driverStore.usageManagedJre"), bytes: usage.jre_bytes },
+    { key: "agent", label: t("driverStore.usageAgentDrivers"), bytes: usage.agent_driver_bytes },
+    { key: "jdbc-plugin", label: t("driverStore.usageJdbcPlugin"), bytes: usage.jdbc_plugin_bytes },
+    { key: "jdbc-driver", label: t("driverStore.usageJdbcDriverJars"), bytes: usage.jdbc_driver_bytes },
   ];
 });
 const jreUsageByKey = computed(() => {
@@ -178,9 +178,9 @@ async function saveJavaRuntimeConfig() {
     });
     javaRuntimeConfig.value = config;
     customJavaPath.value = config.custom_java_path ?? "";
-    toast("Java 运行时设置已保存");
+    toast(t("driverStore.javaRuntimeSaved"));
   } catch (e: any) {
-    toast(`Java 运行时设置失败: ${e}`);
+    toast(t("driverStore.javaRuntimeSaveFailed", { error: e }));
   } finally {
     savingJavaRuntime.value = false;
   }
@@ -190,7 +190,7 @@ async function chooseCustomJavaPath() {
   if (isWeb) return;
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({
-    title: "选择 Java 可执行文件",
+    title: t("driverStore.chooseJavaExecutable"),
     multiple: false,
   });
   if (typeof selected === "string") {
@@ -214,9 +214,9 @@ async function runDriverInstall(dbType: string) {
   try {
     await api.installAgent(dbType);
     await refreshAgents();
-    toast(`${label} 驱动安装成功`);
+    toast(t("driverStore.driverInstallSuccess", { label }));
   } catch (e: any) {
-    toast(`${label} 驱动安装失败: ${e}`);
+    toast(t("driverStore.driverInstallFailed", { label, error: e }));
   } finally {
     installing.value = null;
     progress.value = null;
@@ -241,9 +241,9 @@ async function upgradeAll() {
   try {
     const count = await api.upgradeAllAgents();
     await refreshAgents();
-    toast(`${count} 个驱动升级完成`);
+    toast(t("driverStore.upgradeAllSuccess", { count }));
   } catch (e: any) {
-    toast(`批量升级失败: ${e}`);
+    toast(t("driverStore.upgradeAllFailed", { error: e }));
   } finally {
     upgradingAll.value = false;
     upgradingCurrent.value = "";
@@ -258,9 +258,9 @@ async function uninstallDriver(dbType: string) {
   try {
     await api.uninstallAgent(dbType);
     await refreshAgents();
-    toast(`${label} 驱动已卸载`);
+    toast(t("driverStore.driverUninstallSuccess", { label }));
   } catch (e: any) {
-    toast(`${label} 驱动卸载失败: ${e}`);
+    toast(t("driverStore.driverUninstallFailed", { label, error: e }));
   }
 }
 
@@ -312,7 +312,7 @@ async function importOfflineZip() {
   } else {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const path = await open({
-      title: "选择离线驱动包",
+      title: t("driverStore.chooseOfflineDriverPackage"),
       multiple: false,
       filters: [{ name: "ZIP", extensions: ["zip"] }],
     });
@@ -324,9 +324,9 @@ async function importOfflineZip() {
   try {
     const count = await api.importAgentsFromZip(selected);
     await refreshAgents();
-    toast(`离线导入完成，已安装 ${count} 个驱动`);
+    toast(t("driverStore.offlineImportSuccess", { count }));
   } catch (e: any) {
-    toast(`离线导入失败: ${e}`);
+    toast(t("driverStore.offlineImportFailed", { error: e }));
   } finally {
     importingZip.value = false;
     progress.value = null;
@@ -341,15 +341,15 @@ async function importDriverJar(dbType: string) {
     try {
       await api.importAgentJar(dbType, file);
       await refreshAgents();
-      toast(`${label} 驱动导入成功`);
+      toast(t("driverStore.driverImportSuccess", { label }));
     } catch (e: any) {
-      toast(`${label} 驱动导入失败: ${e}`);
+      toast(t("driverStore.driverImportFailed", { label, error: e }));
     }
     return;
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({
-    title: "选择驱动 JAR 文件",
+    title: t("driverStore.chooseDriverJar"),
     multiple: false,
     filters: [{ name: "JAR", extensions: ["jar"] }],
   });
@@ -357,9 +357,9 @@ async function importDriverJar(dbType: string) {
   try {
     await api.importAgentJar(dbType, selected);
     await refreshAgents();
-    toast(`${label} 驱动导入成功`);
+    toast(t("driverStore.driverImportSuccess", { label }));
   } catch (e: any) {
-    toast(`${label} 驱动导入失败: ${e}`);
+    toast(t("driverStore.driverImportFailed", { label, error: e }));
   }
 }
 
@@ -369,9 +369,9 @@ async function reinstallJre(jreKey: string) {
   try {
     await api.reinstallJre(jreKey);
     await refreshAgents();
-    toast(`JRE ${jreKey} 重新安装成功`);
+    toast(t("driverStore.jreReinstallSuccess", { jre: jreKey }));
   } catch (e: any) {
-    toast(`JRE ${jreKey} 重新安装失败: ${e}`);
+    toast(t("driverStore.jreReinstallFailed", { jre: jreKey, error: e }));
   } finally {
     reinstallingJre.value = null;
     progress.value = null;
@@ -382,7 +382,7 @@ async function uninstallJre(jreKey: string) {
   try {
     await api.uninstallJre(jreKey);
     await refreshAgents();
-    toast(`JRE ${jreKey} 已卸载`);
+    toast(t("driverStore.jreUninstallSuccess", { jre: jreKey }));
   } catch (e: any) {
     toast(String(e));
   }
@@ -466,7 +466,7 @@ async function installJdbcPluginLocal() {
   } else {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const result = await open({
-      title: "选择 JDBC 插件 zip 文件",
+      title: t("driverStore.chooseJdbcPluginZip"),
       multiple: false,
       filters: [{ name: "ZIP", extensions: ["zip"] }],
     });
@@ -597,9 +597,13 @@ onUnmounted(() => {
         <Tabs default-value="agent">
           <div class="mb-5 rounded-xl border bg-muted/20 p-4">
             <div class="flex items-center justify-between gap-3">
-              <div class="text-sm font-medium">空间占用明细</div>
+              <div class="text-sm font-medium">{{ t("driverStore.usageTitle") }}</div>
               <div class="text-xs text-muted-foreground">
-                {{ usageSummary.length ? `总计 ${formatBytes(usageSummary[0].bytes)}` : "统计中..." }}
+                {{
+                  usageSummary.length
+                    ? t("driverStore.usageTotal", { size: formatBytes(usageSummary[0].bytes) })
+                    : t("driverStore.calculating")
+                }}
               </div>
             </div>
             <div v-if="usageSummary.length" class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
@@ -617,11 +621,11 @@ onUnmounted(() => {
           <div class="flex items-center justify-between">
             <TabsList class="w-fit">
               <TabsTrigger value="agent" class="gap-1.5 relative">
-                内置驱动
+                {{ t("driverStore.agentDrivers") }}
                 <span v-if="agentTabUpdateCount > 0" class="inline-block h-2 w-2 rounded-full bg-red-500" />
               </TabsTrigger>
               <TabsTrigger value="jdbc" class="gap-1.5 relative">
-                JDBC 驱动
+                {{ t("driverStore.jdbcDrivers") }}
                 <span v-if="jdbcTabUpdateCount > 0" class="inline-block h-2 w-2 rounded-full bg-red-500" />
               </TabsTrigger>
             </TabsList>
@@ -634,7 +638,7 @@ onUnmounted(() => {
                 @click="importOfflineZip"
               >
                 <FileUp class="h-3.5 w-3.5" />
-                {{ importingZip ? "导入中..." : "导入离线包" }}
+                {{ importingZip ? t("driverStore.importing") : t("driverStore.importOfflinePackage") }}
               </Button>
               <Button
                 variant="ghost"
@@ -644,7 +648,7 @@ onUnmounted(() => {
                 @click="forceRefresh"
               >
                 <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': refreshing }" />
-                刷新
+                {{ t("driverStore.refresh") }}
               </Button>
             </div>
           </div>
@@ -655,15 +659,15 @@ onUnmounted(() => {
             <div class="rounded-xl border bg-muted/20 p-4 space-y-3">
               <div class="flex flex-wrap items-end gap-3">
                 <div class="min-w-[220px] flex-1 space-y-1.5">
-                  <Label>Java 运行时</Label>
+                  <Label>{{ t("driverStore.javaRuntime") }}</Label>
                   <Select :model-value="javaRuntimeConfig.mode" @update:model-value="setJavaRuntimeMode">
                     <SelectTrigger class="h-8 text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="managed">DBX 托管 JRE</SelectItem>
-                      <SelectItem value="system">系统 java</SelectItem>
-                      <SelectItem value="custom">自定义路径</SelectItem>
+                      <SelectItem value="managed">{{ t("driverStore.javaRuntimeManaged") }}</SelectItem>
+                      <SelectItem value="system">{{ t("driverStore.javaRuntimeSystem") }}</SelectItem>
+                      <SelectItem value="custom">{{ t("driverStore.javaRuntimeCustom") }}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -672,23 +676,23 @@ onUnmounted(() => {
                   :disabled="savingJavaRuntime || (javaRuntimeConfig.mode === 'custom' && !customJavaPath.trim())"
                   @click="saveJavaRuntimeConfig"
                 >
-                  {{ savingJavaRuntime ? "保存中..." : "保存" }}
+                  {{ savingJavaRuntime ? t("driverStore.saving") : t("settings.save") }}
                 </Button>
               </div>
               <div v-if="javaRuntimeConfig.mode === 'custom'" class="flex items-center gap-2">
                 <Input
                   v-model="customJavaPath"
                   class="h-8 flex-1 text-xs"
-                  placeholder="/path/to/java 或 /path/to/jdk"
+                  :placeholder="t('driverStore.customJavaPathPlaceholder')"
                   @keydown.enter.prevent="saveJavaRuntimeConfig"
                 />
                 <Button variant="outline" class="h-8 shrink-0 rounded-full text-xs" @click="chooseCustomJavaPath">
                   <FolderOpen class="h-3.5 w-3.5" />
-                  选择
+                  {{ t("driverStore.choose") }}
                 </Button>
               </div>
               <p v-else-if="javaRuntimeConfig.mode === 'system'" class="text-xs text-muted-foreground">
-                使用当前环境 PATH 中的 java。
+                {{ t("driverStore.systemJavaHint") }}
               </p>
             </div>
 
@@ -696,7 +700,7 @@ onUnmounted(() => {
             <div v-if="installedJres.length > 0" class="rounded-xl border bg-muted/20 p-4 space-y-2.5">
               <div v-for="jre in installedJres" :key="jre.key" class="flex items-center justify-between gap-3">
                 <div class="min-w-0">
-                  <div class="text-sm font-medium">JRE {{ jre.key }} 运行时</div>
+                  <div class="text-sm font-medium">{{ t("driverStore.jreRuntimeTitle", { jre: jre.key }) }}</div>
                 </div>
                 <div class="flex shrink-0 items-center gap-3">
                   <span
@@ -706,11 +710,11 @@ onUnmounted(() => {
                     {{ jreUsageLabel(jre.key) }}
                   </span>
                   <Check v-if="jre.installed" class="h-4 w-4 text-green-600" />
-                  <span v-else class="text-xs text-muted-foreground">未安装</span>
+                  <span v-else class="text-xs text-muted-foreground">{{ t("driverStore.notInstalled") }}</span>
                   <DriverInstallProgressCircle
                     v-if="reinstallingJre === jre.key"
                     :percent="progressNumber"
-                    :title="progressTitle(jre.installed ? '重装中' : '安装中')"
+                    :title="progressTitle(jre.installed ? t('driverStore.reinstalling') : t('driverStore.installing'))"
                   />
                   <Button
                     v-else-if="!jre.installed"
@@ -722,7 +726,7 @@ onUnmounted(() => {
                     @click="reinstallJre(jre.key)"
                   >
                     <Download class="h-3.5 w-3.5 mr-1" />
-                    安装
+                    {{ t("driverStore.install") }}
                   </Button>
                   <Button
                     v-else-if="jre.installed"
@@ -734,7 +738,7 @@ onUnmounted(() => {
                     @click="reinstallJre(jre.key)"
                   >
                     <RotateCcw class="h-3.5 w-3.5 mr-1" />
-                    重新安装
+                    {{ t("driverStore.reinstall") }}
                   </Button>
                   <Button
                     v-if="jre.installed"
@@ -745,21 +749,25 @@ onUnmounted(() => {
                     :disabled="reinstallingJre !== null || installing !== null"
                     @click="uninstallJre(jre.key)"
                   >
-                    卸载
+                    {{ t("driverStore.uninstall") }}
                   </Button>
                 </div>
               </div>
             </div>
             <div v-else class="rounded-xl border bg-muted/20 p-4">
-              <div class="text-sm font-medium">JRE 运行时</div>
-              <p class="text-xs text-muted-foreground mt-0.5">首次安装驱动时自动下载</p>
+              <div class="text-sm font-medium">{{ t("driverStore.jreRuntime") }}</div>
+              <p class="text-xs text-muted-foreground mt-0.5">{{ t("driverStore.jreRuntimeAutoDownloadHint") }}</p>
             </div>
 
             <!-- Driver List -->
-            <div v-if="drivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">加载中...</div>
+            <div v-if="drivers.length === 0" class="py-12 text-center text-sm text-muted-foreground">
+              {{ t("common.loading") }}
+            </div>
             <div v-else class="rounded-md border divide-y">
               <div v-if="updatableCount > 0" class="flex items-center justify-between px-4 py-2 bg-muted/30">
-                <span class="text-xs text-muted-foreground">{{ updatableCount }} 个驱动可更新</span>
+                <span class="text-xs text-muted-foreground">{{
+                  t("driverStore.driversUpdatable", { count: updatableCount })
+                }}</span>
                 <Button
                   size="sm"
                   class="h-7 rounded-full text-xs"
@@ -768,7 +776,11 @@ onUnmounted(() => {
                 >
                   <Loader2 v-if="upgradingAll" class="h-3 w-3 animate-spin mr-1" />
                   <Download v-else class="h-3 w-3 mr-1" />
-                  {{ upgradingAll ? `升级中 (${upgradingIndex}/${upgradingTotal})` : "全部升级" }}
+                  {{
+                    upgradingAll
+                      ? t("driverStore.upgradingProgress", { current: upgradingIndex, total: upgradingTotal })
+                      : t("driverStore.upgradeAll")
+                  }}
                 </Button>
               </div>
               <div
@@ -822,12 +834,12 @@ onUnmounted(() => {
                     @click="removeQueuedDriverInstall(driver.db_type)"
                   >
                     <Clock3 class="h-3 w-3 mr-1" />
-                    排队中
+                    {{ t("driverStore.queued") }}
                   </Button>
                   <DriverInstallProgressCircle
                     v-else-if="!driver.installed && isDriverProgressActive(driver.db_type)"
                     :percent="progressNumber"
-                    :title="progressTitle('安装中')"
+                    :title="progressTitle(t('driverStore.installing'))"
                   />
                   <Button
                     v-else-if="!driver.installed"
@@ -837,7 +849,7 @@ onUnmounted(() => {
                     @click="installDriver(driver.db_type)"
                   >
                     <Download class="h-3 w-3 mr-1" />
-                    安装
+                    {{ t("driverStore.install") }}
                   </Button>
                   <Button
                     v-if="
@@ -846,7 +858,7 @@ onUnmounted(() => {
                     size="sm"
                     variant="ghost"
                     class="h-7 w-7 rounded-full text-xs text-muted-foreground"
-                    title="导入本地 JAR"
+                    :title="t('driverStore.importLocalJar')"
                     :disabled="upgradingAll || installing !== null"
                     @click="importDriverJar(driver.db_type)"
                   >
@@ -866,12 +878,12 @@ onUnmounted(() => {
                       @click="removeQueuedDriverInstall(driver.db_type)"
                     >
                       <Clock3 class="h-3 w-3 mr-1" />
-                      排队中
+                      {{ t("driverStore.queued") }}
                     </Button>
                     <DriverInstallProgressCircle
                       v-else-if="driver.update_available && isDriverProgressActive(driver.db_type)"
                       :percent="progressNumber"
-                      :title="progressTitle('更新中')"
+                      :title="progressTitle(t('driverStore.updating'))"
                     />
                     <Button
                       v-else-if="driver.update_available"
@@ -881,7 +893,7 @@ onUnmounted(() => {
                       :disabled="upgradingAll"
                       @click="installDriver(driver.db_type)"
                     >
-                      更新
+                      {{ t("driverStore.update") }}
                     </Button>
                     <Button
                       variant="ghost"
@@ -890,7 +902,7 @@ onUnmounted(() => {
                       :disabled="installing !== null || upgradingAll || isDriverQueued(driver.db_type)"
                       @click="uninstallDriver(driver.db_type)"
                     >
-                      卸载
+                      {{ t("driverStore.uninstall") }}
                     </Button>
                   </template>
                 </div>
@@ -967,7 +979,7 @@ onUnmounted(() => {
                     @click="installJdbcPluginLocal"
                   >
                     <FolderOpen class="h-3.5 w-3.5 mr-1" />
-                    本地安装
+                    {{ t("driverStore.localInstall") }}
                   </Button>
                 </div>
               </div>

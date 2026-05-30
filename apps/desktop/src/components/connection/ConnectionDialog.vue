@@ -1901,7 +1901,7 @@ function openExternalUrl(url: string) {
                   </div>
 
                   <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">连接方式</Label>
+                    <Label class="text-right text-xs">{{ t("connection.mode") }}</Label>
                     <div
                       class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5"
                     >
@@ -1916,7 +1916,7 @@ function openExternalUrl(url: string) {
                         :aria-pressed="form.oracle_connection_type !== 'sid'"
                         @click="form.oracle_connection_type = 'service_name'"
                       >
-                        服务名
+                        {{ t("connection.serviceNameOnly") }}
                       </button>
                       <button
                         type="button"
@@ -1937,16 +1937,17 @@ function openExternalUrl(url: string) {
                   <div v-if="shouldShowAgentDriverInstallHint" class="grid grid-cols-4 items-center gap-4">
                     <span />
                     <p class="col-span-3 text-xs text-muted-foreground">
-                      需要在顶部导航栏「<a
+                      {{ t("connection.driverInstallHintPrefix")
+                      }}<a
                         class="underline cursor-pointer text-primary hover:text-primary/80"
                         @click="emit('openDriverStore')"
-                        >驱动管理</a
-                      >」中安装对应的驱动才能连接。
+                        >{{ t("toolbar.driverManager") }}</a
+                      >{{ t("connection.driverInstallHintSuffix") }}
                     </p>
                   </div>
 
                   <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
-                    <Label class="text-right text-xs">版本</Label>
+                    <Label class="text-right text-xs">{{ t("connection.version") }}</Label>
                     <Select
                       :model-value="selectedType === 'oracle-10g' ? 'oracle-10g' : 'oracle'"
                       @update:model-value="(val) => applyProfile(String(val), true)"

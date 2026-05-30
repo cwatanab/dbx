@@ -1504,7 +1504,7 @@ watch(
                       id="webdav-password"
                       v-model="webdavPassword"
                       type="password"
-                      :placeholder="webdavHasSavedPassword ? '••••••••' : '输入密码'"
+                      :placeholder="webdavHasSavedPassword ? '••••••••' : t('settings.syncPasswordPlaceholder')"
                       :disabled="webdavHasSavedPassword"
                       autocomplete="current-password"
                     />
@@ -1513,7 +1513,7 @@ watch(
                       variant="ghost"
                       size="icon-xs"
                       class="absolute right-1 top-1/2 -translate-y-1/2"
-                      title="清除已保存的密码"
+                      :title="t('settings.syncClearSavedPassword')"
                       @click="
                         webdavRememberPassword = false;
                         forgetWebdavSavedPassword(currentWebDavAccountConfig());

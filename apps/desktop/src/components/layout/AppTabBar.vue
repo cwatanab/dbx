@@ -208,7 +208,7 @@ const dataTabsMenuContainerClass = computed(() =>
           <Tooltip>
             <TooltipTrigger as-child>
               <div
-                class="group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
                 :class="
                   settingsStore.editorSettings.appLayout === 'classic'
                     ? [
@@ -289,11 +289,11 @@ const dataTabsMenuContainerClass = computed(() =>
         <span class="shrink-0 text-amber-600 dark:text-amber-400">
           <Package class="h-3.5 w-3.5" />
         </span>
-        <span class="min-w-0 truncate flex-1">驱动管理</span>
+        <span class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
         <span
           v-if="(agentDriverUpdateCount ?? 0) > 0"
           class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white"
-          aria-label="可更新驱动数量"
+          :aria-label="t('toolbar.updatableDriverCount')"
         >
           {{ (agentDriverUpdateCount ?? 0) > 99 ? "99+" : agentDriverUpdateCount }}
         </span>

@@ -147,6 +147,12 @@ html.disable-transitions *::after {
   animation-duration: 0s !important;
 }
 
+body.dbx-table-reference-dragging,
+body.dbx-table-reference-dragging * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

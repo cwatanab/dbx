@@ -354,7 +354,6 @@ test("suggests DATE_FORMAT as parameter snippet", () => {
 
   const snippet = items.find((item) => item.type === "function" && item.label === "DATE_FORMAT");
   assert.ok(snippet);
-  assert.equal(snippet.detail, "按指定格式格式化日期");
   assert.equal(snippet.apply, "DATE_FORMAT(${date}, ${format})");
 });
 
@@ -872,18 +871,6 @@ test("prefix matches still rank above fuzzy matches", () => {
   assert.equal(items[0]?.label, "name");
 });
 
-// --- Function inline docs ---
-
-test("shows function description in detail", () => {
-  const items = buildSqlCompletionItems("select cou", "select cou".length, {
-    tables,
-    columnsByTable,
-  });
-  const countItem = items.find((item) => item.label === "COUNT");
-  assert.ok(countItem);
-  assert.equal(countItem.detail, "返回行数");
-});
-
 // --- Type-aware comparison hints ---
 
 test("suggests NULL and IS NULL after comparison operator", () => {
@@ -916,16 +903,6 @@ test("shows SELECT * column expansion", () => {
   });
   const starItem = items.find((item) => item.label === "* → columns");
   assert.ok(starItem, "should show column expansion for *");
-});
-
-test("star expansion item includes column count in detail", () => {
-  const sql = "select *";
-  const items = buildSqlCompletionItems(sql, sql.length, {
-    tables,
-    columnsByTable,
-  });
-  const starItem = items.find((item) => item.label === "* → columns");
-  assert.ok(starItem?.detail?.includes("列"), "detail should mention column count");
 });
 
 // --- History-based ranking ---

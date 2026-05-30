@@ -129,6 +129,7 @@ export function buildEditorFontThemeRules(
       fontSize: `var(${EDITOR_FONT_SIZE_CSS_VAR}, ${defaults?.size ?? 13}px)`,
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, ${defaults?.family ?? "monospace"})`,
       position: "relative",
+      userSelect: "none",
     },
     ".cm-gutters:after": {
       background: "rgba(148, 163, 184, 0.38)",
@@ -143,6 +144,7 @@ export function buildEditorFontThemeRules(
     },
     ".cm-lineNumbers .cm-gutterElement": {
       paddingRight: "16px",
+      userSelect: "none",
     },
   };
 }

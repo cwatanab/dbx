@@ -94,9 +94,9 @@ watch(
           @click="handleReleaseNotesClick"
         />
         <p v-if="!isDesktop && updateInfo?.update_available" class="text-xs text-muted-foreground">
-          Docker 用户请运行
+          {{ t("updates.dockerUsersRun") }}
           <code class="bg-muted px-1 py-0.5 rounded text-[11px]">docker compose pull && docker compose up -d</code>
-          更新
+          {{ t("updates.toUpdate") }}
         </p>
       </div>
       <DialogFooter>
