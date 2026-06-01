@@ -67,8 +67,11 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     if (!tab) return;
     if (tab.mode === "data" && tab.tableMeta) {
       tab.whereInput = whereInput ?? "";
-      queryStore.updateSql(tab.id, await buildTableSql(tab, { whereInput, orderBy, limit, offset }));
-      await queryStore.executeCurrentTab();
+      const pageLimit = limit ?? settingsStore.editorSettings.pageSize;
+      const pageOffset = offset ?? 0;
+      const nextSql = await buildTableSql(tab, { whereInput, orderBy, limit: pageLimit, offset: pageOffset });
+      queryStore.updateSql(tab.id, nextSql);
+      await queryStore.executeTabSql(tab.id, nextSql, { pagination: { limit: pageLimit, offset: pageOffset } });
       return;
     }
     if (tab.resultSortedSql) {
@@ -111,7 +114,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     tab.whereInput = whereInput ?? "";
     const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy });
     queryStore.updateSql(tab.id, sql);
-    await queryStore.executeCurrentTab();
+    await queryStore.executeTabSql(tab.id, sql, { pagination: { offset, limit } });
   }
 
   async function onSort(column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string) {

@@ -300,6 +300,58 @@ test("starting a new query clears the previous result payload immediately", asyn
   }
 });
 
+test("data tab execution preserves pagination offset metadata", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let executeBody: any;
+  let preparedPagination = false;
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  const tabId = store.createTab("conn-1", "db", "users", "data", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      preparedPagination = true;
+      return new Response("unexpected pagination plan request", { status: 500 });
+    }
+    if (url === "/api/query/execute-multi") {
+      executeBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify([{ columns: ["id"], rows: [[101]], affected_rows: 0, execution_time_ms: 1 }]),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 100 OFFSET 100;', {
+      pagination: { limit: 100, offset: 100 },
+    });
+
+    assert.equal(preparedPagination, false);
+    assert.equal(executeBody.sql, 'SELECT * FROM "users" LIMIT 100 OFFSET 100;');
+    assert.equal(executeBody.maxRows, 100);
+    assert.equal(executeBody.fetchSize, 100);
+    assert.equal(executeBody.schema, undefined);
+    assert.equal(tab.resultPageLimit, 100);
+    assert.equal(tab.resultPageOffset, 100);
+    assert.deepEqual(tab.result?.rows, [[101]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("query execution finishes without waiting for metadata analysis", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

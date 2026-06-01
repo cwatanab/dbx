@@ -1681,6 +1681,7 @@ watch(
     pageSize.value = normalizedLimit;
     currentPage.value = Math.floor(offset / normalizedLimit) + 1;
   },
+  { immediate: true },
 );
 const canGoNextPage = computed(() => props.result.has_more === true || props.result.rows.length >= pageSize.value);
 const canJumpLastPage = computed(() => canGoNextPage.value && (!!props.tableMeta || !!props.countSql));

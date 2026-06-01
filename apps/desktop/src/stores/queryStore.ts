@@ -674,7 +674,8 @@ export const useQueryStore = defineStore("query", () => {
         countSql = plan.countSql;
         useAgentResultSession = plan.useAgentResultSession;
       } else if (tab.mode === "data") {
-        pageLimit = settingsStore.editorSettings.pageSize;
+        pageLimit = options?.pagination?.limit ?? settingsStore.editorSettings.pageSize;
+        pageOffset = options?.pagination?.offset ?? 0;
       }
       const mongoFind = conn?.db_type === "mongodb" ? parseMongoFindCommand(sql) : null;
       if (mongoFind) {
