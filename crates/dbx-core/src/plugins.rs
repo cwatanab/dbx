@@ -245,23 +245,32 @@ impl PluginDriverSession {
     where
         T: DeserializeOwned,
     {
+        self.invoke_with_timeout(method, params, Some(PLUGIN_REQUEST_TIMEOUT)).await
+    }
+
+    pub async fn invoke_with_timeout<T>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let result = timeout(PLUGIN_REQUEST_TIMEOUT, async {
+        let invoke = async {
             let mut process = self.process.lock().await;
             self.invoke_locked(&mut process, request_id, method, params).await
-        })
-        .await;
-
-        match result {
-            Ok(result) => result,
-            Err(_) => {
-                self.kill().await;
-                Err(format!(
-                    "Plugin '{}' timed out after {} seconds",
-                    self.plugin.manifest.id,
-                    PLUGIN_REQUEST_TIMEOUT.as_secs()
-                ))
-            }
+        };
+        match timeout_duration {
+            Some(duration) => match timeout(duration, invoke).await {
+                Ok(result) => result,
+                Err(_) => {
+                    self.kill().await;
+                    Err(format!("Plugin '{}' timed out after {} seconds", self.plugin.manifest.id, duration.as_secs()))
+                }
+            },
+            None => invoke.await,
         }
     }
 

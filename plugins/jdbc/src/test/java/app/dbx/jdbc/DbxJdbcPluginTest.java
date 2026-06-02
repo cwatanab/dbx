@@ -76,6 +76,36 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void executeQueryPreservesChineseTextValues() throws Exception {
+        JsonNode response = request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "SELECT '中文测试' AS label"
+            }
+            """.formatted(CONNECTION));
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals("中文测试", response.path("result").path("rows").path(0).path(0).asText());
+    }
+
+    @Test
+    void executeQueryHonorsMaxRowsAndAcceptsExecutionOptions() throws Exception {
+        JsonNode response = request("executeQuery", """
+            {
+              "connection": %s,
+              "sql": "SELECT * FROM (VALUES (1), (2)) AS t(n)",
+              "maxRows": 1,
+              "fetchSize": 1,
+              "timeoutSecs": 60
+            }
+            """.formatted(CONNECTION));
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, response.path("result").path("rows").size());
+        assertEquals(true, response.path("result").path("truncated").asBoolean());
+    }
+
+    @Test
     void driverQuirksDetectYashanJdbcUrl() throws Exception {
         JsonNode yashan = MAPPER.readTree("""
             {
