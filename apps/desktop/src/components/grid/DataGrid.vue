@@ -43,6 +43,8 @@ import {
   Link2,
   ListTree,
   Maximize2,
+  PanelBottom,
+  PanelRight,
   TableProperties,
   LockKeyhole,
 } from "lucide-vue-next";
@@ -393,7 +395,6 @@ const rowDetailDialogOpen = ref(false);
 const rowDetailDialogRowId = ref<number | null>(null);
 const columnDetailDialogOpen = ref(false);
 const columnDetailDialogColumnIndex = ref<number | null>(null);
-const detailWidth = ref(settingsStore.editorSettings.cellDetailDrawerWidth);
 const isResizingDetail = ref(false);
 const imagePreviewOpen = ref(false);
 const imagePreviewSrc = ref("");
@@ -3960,19 +3961,27 @@ const sqlOneLiner = computed(() => props.sql?.replace(/\s+/g, " ").trim() || "")
 type TableInfoTab = "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl";
 
 const TABLE_INFO_DRAWER_MIN_WIDTH = 240;
-const CELL_DETAIL_DRAWER_MIN_WIDTH = 260;
+const CELL_DETAIL_PANEL_MIN_HEIGHT = 180;
+const CELL_DETAIL_PANEL_MIN_WIDTH = 260;
+const CELL_DETAIL_PANEL_MAX_HEIGHT = 520;
 const DRAWER_MAX_WIDTH = 900;
+function clampCellDetailPanelSize(value: number, layout = cellDetailPanelLayout.value): number {
+  const min = layout === "bottom" ? CELL_DETAIL_PANEL_MIN_HEIGHT : CELL_DETAIL_PANEL_MIN_WIDTH;
+  const max = layout === "bottom" ? CELL_DETAIL_PANEL_MAX_HEIGHT : DRAWER_MAX_WIDTH;
+  return Math.min(Math.max(value, min), max);
+}
 const showTableInfo = globalDdlOpen;
 const activeTableInfoTab = ref<TableInfoTab>("columns");
 const ddlContent = ref("");
 const ddlLoading = ref(false);
 const ddlWidth = ref(settingsStore.editorSettings.tableInfoDrawerWidth);
+const detailPanelHeight = ref(settingsStore.editorSettings.cellDetailDrawerWidth);
 const ddlWrap = ref(true);
 const isResizingDdl = ref(false);
 let ddlResizeStartX = 0;
 let ddlResizeStartWidth = 0;
-let detailResizeStartX = 0;
-let detailResizeStartWidth = 0;
+let detailResizeStartY = 0;
+let detailResizeStartHeight = 0;
 const indexes = ref<IndexInfo[]>([]);
 const indexesLoaded = ref(false);
 const indexesLoading = ref(false);
@@ -3986,6 +3995,8 @@ const triggersLoaded = ref(false);
 const triggersLoading = ref(false);
 const triggersError = ref("");
 const searchQuery = ref("");
+const cellDetailPanelLayout = computed(() => settingsStore.editorSettings.cellDetailPanelLayout);
+const cellDetailPanelIsBottom = computed(() => cellDetailPanelLayout.value === "bottom");
 
 watch(activeTableInfoTab, () => {
   searchQuery.value = "";
@@ -4000,18 +4011,46 @@ watch(
 
 watch(
   () => settingsStore.editorSettings.cellDetailDrawerWidth,
-  (width) => {
-    if (!isResizingDetail.value) detailWidth.value = width;
+  (height) => {
+    if (!isResizingDetail.value) detailPanelHeight.value = clampCellDetailPanelSize(height);
   },
 );
+
+watch(cellDetailPanelLayout, (layout) => {
+  if (!isResizingDetail.value) detailPanelHeight.value = clampCellDetailPanelSize(detailPanelHeight.value, layout);
+});
 
 const ddlDrawerStyle = computed(() => ({
   width: `${ddlWidth.value}px`,
 }));
 
-const detailDrawerStyle = computed(() => ({
-  width: `${detailWidth.value}px`,
-}));
+const detailPanelStyle = computed(() =>
+  cellDetailPanelIsBottom.value
+    ? { maxHeight: `min(42vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px)` }
+    : { width: `${detailPanelHeight.value}px` },
+);
+
+const contentGridStyle = computed(() =>
+  cellDetailPanelIsBottom.value
+    ? {
+        gridTemplateColumns: "minmax(0, 1fr) auto",
+        gridTemplateRows: "minmax(0, 1fr) auto",
+      }
+    : {
+        gridTemplateColumns: "minmax(0, 1fr) auto auto",
+        gridTemplateRows: "minmax(0, 1fr)",
+      },
+);
+
+function toggleCellDetailPanelLayout() {
+  const nextLayout = cellDetailPanelIsBottom.value ? "right" : "bottom";
+  const nextSize = clampCellDetailPanelSize(detailPanelHeight.value, nextLayout);
+  detailPanelHeight.value = nextSize;
+  settingsStore.updateEditorSettings({
+    ...(nextLayout === "right" ? { cellDetailDrawerWidth: nextSize } : {}),
+    cellDetailPanelLayout: nextLayout,
+  });
+}
 
 const tableInfoTabs = computed(
   () =>
@@ -4224,8 +4263,8 @@ function onDdlResizeEnd() {
 
 function onDetailResizeStart(event: MouseEvent) {
   isResizingDetail.value = true;
-  detailResizeStartX = event.clientX;
-  detailResizeStartWidth = detailWidth.value;
+  detailResizeStartY = event.clientX;
+  detailResizeStartHeight = detailPanelHeight.value;
   document.body.classList.add("select-none", "cursor-col-resize");
   window.addEventListener("mousemove", onDetailResizeMove);
   window.addEventListener("mouseup", onDetailResizeEnd);
@@ -4233,16 +4272,16 @@ function onDetailResizeStart(event: MouseEvent) {
 
 function onDetailResizeMove(event: MouseEvent) {
   if (!isResizingDetail.value) return;
-  const nextWidth = detailResizeStartWidth + detailResizeStartX - event.clientX;
-  detailWidth.value = Math.min(Math.max(nextWidth, CELL_DETAIL_DRAWER_MIN_WIDTH), DRAWER_MAX_WIDTH);
+  const nextSize = detailResizeStartHeight + detailResizeStartY - event.clientX;
+  detailPanelHeight.value = clampCellDetailPanelSize(nextSize);
 }
 
 function onDetailResizeEnd() {
   if (isResizingDetail.value) {
-    settingsStore.updateEditorSettings({ cellDetailDrawerWidth: detailWidth.value });
+    settingsStore.updateEditorSettings({ cellDetailDrawerWidth: detailPanelHeight.value });
   }
   isResizingDetail.value = false;
-  document.body.classList.remove("select-none", "cursor-col-resize");
+  document.body.classList.remove("select-none", "cursor-row-resize", "cursor-col-resize");
   window.removeEventListener("mousemove", onDetailResizeMove);
   window.removeEventListener("mouseup", onDetailResizeEnd);
 }
@@ -5001,9 +5040,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         >
           <span>{{ t("grid.truncatedHint", { count: pageSize }) }}</span>
         </div>
-        <!-- Content area: table + DDL drawer -->
-        <div class="flex-1 flex min-h-0 overflow-hidden">
-          <div class="flex-1 flex flex-col min-w-0 overflow-hidden relative">
+        <!-- Content area: table + side/bottom detail panes -->
+        <div class="flex-1 grid min-h-0 overflow-hidden" :style="contentGridStyle">
+          <div class="col-start-1 row-start-1 flex flex-col min-w-0 overflow-hidden relative">
             <!-- Search overlay (Ctrl+F) -->
             <Transition
               enter-active-class="transition-opacity duration-150"
@@ -5919,8 +5958,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           <!-- Table Info Drawer -->
           <div
             v-if="showTableInfo"
-            class="relative shrink-0 border-l flex flex-col bg-background min-w-0"
-            :class="{ 'ddl-drawer-resizing': isResizingDdl }"
+            class="relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0"
+            :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]"
             :style="ddlDrawerStyle"
           >
             <div
@@ -6125,17 +6164,31 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           <!-- Cell Detail Drawer -->
           <div
             v-if="showCellDetail && activeCellDetail"
-            class="relative shrink-0 border-l flex flex-col bg-background min-w-0"
-            :class="{ 'detail-drawer-resizing': isResizingDetail }"
-            :style="detailDrawerStyle"
+            class="relative flex flex-col bg-background min-w-0"
+            :class="[
+              cellDetailPanelIsBottom ? 'col-start-1 row-start-2 border-t' : 'col-start-3 row-start-1 border-l',
+              { 'detail-drawer-resizing': isResizingDetail },
+            ]"
+            :style="detailPanelStyle"
           >
             <div
+              v-if="!cellDetailPanelIsBottom"
               class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30"
               @mousedown.prevent="onDetailResizeStart"
             />
             <div class="h-9 flex items-center gap-2 px-3 border-b shrink-0 bg-muted/20">
               <Info class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ t("grid.cellDetails") }}</span>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-5 w-5"
+                :title="cellDetailPanelIsBottom ? t('grid.cellDetailLayoutRight') : t('grid.cellDetailLayoutBottom')"
+                @click="toggleCellDetailPanelLayout"
+              >
+                <PanelRight v-if="cellDetailPanelIsBottom" class="w-3 h-3" />
+                <PanelBottom v-else class="w-3 h-3" />
+              </Button>
               <Button
                 variant="ghost"
                 size="icon"
@@ -6186,20 +6239,32 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </div>
 
               <TabsContent value="details" class="m-0 min-h-0 flex-1 flex flex-col">
-                <div class="flex-1 min-h-0 overflow-auto p-3 text-xs space-y-3">
-                  <div class="space-y-1">
-                    <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
-                    <div class="font-medium break-all">{{ activeCellDetail.column }}</div>
-                  </div>
-                  <div class="grid grid-cols-2 gap-3">
+                <div
+                  class="flex-1 min-h-0 overflow-auto p-3 text-xs"
+                  :class="
+                    cellDetailPanelIsBottom ? 'grid grid-cols-[minmax(0,1fr)_minmax(220px,30%)] gap-3' : 'space-y-3'
+                  "
+                >
+                  <div
+                    v-if="cellDetailPanelIsBottom"
+                    class="col-span-2 grid grid-cols-[minmax(180px,1.6fr)_repeat(4,minmax(74px,0.55fr))_minmax(160px,1fr)] gap-3 rounded border bg-muted/20 p-2"
+                  >
+                    <div class="min-w-0 space-y-1">
+                      <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
+                      <div class="truncate font-medium" :title="activeCellDetail.column">
+                        {{ activeCellDetail.column }}
+                      </div>
+                    </div>
                     <div class="space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.rowNumber") }}</div>
                       <div>{{ activeCellDetail.rowNumber }}</div>
                     </div>
-                    <div class="space-y-1">
+                    <div class="min-w-0 space-y-1">
                       <div class="text-muted-foreground">{{ t("grid.columnType") }}</div>
                       <div
+                        class="truncate"
                         :class="activeCellDetail.type ? typeColorClass(activeCellDetail.type) : 'text-muted-foreground'"
+                        :title="activeCellDetail.type || '-'"
                       >
                         {{ activeCellDetail.type || "-" }}
                       </div>
@@ -6212,14 +6277,50 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       <div class="text-muted-foreground">{{ t("grid.valueLength") }}</div>
                       <div>{{ activeCellDetail.length }}</div>
                     </div>
-                  </div>
-                  <div class="space-y-1">
-                    <div class="text-muted-foreground">{{ t("grid.columnComment") }}</div>
-                    <div class="whitespace-pre-wrap break-words">
-                      {{ activeCellDetail.comment || t("grid.noComment") }}
+                    <div class="min-w-0 space-y-1">
+                      <div class="text-muted-foreground">{{ t("grid.columnComment") }}</div>
+                      <div class="truncate" :title="activeCellDetail.comment || t('grid.noComment')">
+                        {{ activeCellDetail.comment || t("grid.noComment") }}
+                      </div>
                     </div>
                   </div>
-                  <div class="space-y-1">
+                  <template v-else>
+                    <div class="space-y-1">
+                      <div class="text-muted-foreground">{{ t("grid.columnName") }}</div>
+                      <div class="font-medium break-all">{{ activeCellDetail.column }}</div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                      <div class="space-y-1">
+                        <div class="text-muted-foreground">{{ t("grid.rowNumber") }}</div>
+                        <div>{{ activeCellDetail.rowNumber }}</div>
+                      </div>
+                      <div class="space-y-1">
+                        <div class="text-muted-foreground">{{ t("grid.columnType") }}</div>
+                        <div
+                          :class="
+                            activeCellDetail.type ? typeColorClass(activeCellDetail.type) : 'text-muted-foreground'
+                          "
+                        >
+                          {{ activeCellDetail.type || "-" }}
+                        </div>
+                      </div>
+                      <div class="space-y-1">
+                        <div class="text-muted-foreground">{{ t("grid.nullValue") }}</div>
+                        <div>{{ activeCellDetail.value === null ? "true" : "false" }}</div>
+                      </div>
+                      <div class="space-y-1">
+                        <div class="text-muted-foreground">{{ t("grid.valueLength") }}</div>
+                        <div>{{ activeCellDetail.length }}</div>
+                      </div>
+                    </div>
+                    <div class="space-y-1">
+                      <div class="text-muted-foreground">{{ t("grid.columnComment") }}</div>
+                      <div class="whitespace-pre-wrap break-words">
+                        {{ activeCellDetail.comment || t("grid.noComment") }}
+                      </div>
+                    </div>
+                  </template>
+                  <div class="space-y-1" :class="cellDetailPanelIsBottom ? 'min-h-0' : ''">
                     <div class="flex items-center justify-between gap-2">
                       <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
                       <div v-if="!isEditingDetail" class="flex items-center gap-1">
@@ -6292,7 +6393,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         v-else
                         ref="detailsEditorContainer"
                         data-cell-detail-editor-root
-                        class="w-full h-40 rounded border overflow-hidden"
+                        class="w-full rounded border overflow-hidden"
+                        :class="cellDetailPanelIsBottom ? 'h-28' : 'h-40'"
                       />
                       <div class="flex gap-1 mt-1">
                         <Button size="sm" class="h-6 text-xs" @click="commitDetailEdit">
@@ -6305,8 +6407,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     </template>
                     <pre
                       v-else
-                      class="max-h-56 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre cursor-pointer hover:border-primary/50"
-                      :class="{ 'cursor-text': activeCellDetail.isEditable }"
+                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre cursor-pointer hover:border-primary/50"
+                      :class="[
+                        { 'cursor-text': activeCellDetail.isEditable },
+                        cellDetailPanelIsBottom ? 'max-h-36' : 'max-h-56',
+                      ]"
                       @dblclick="startDetailEdit"
                       >{{ activeCellDetail.displayValuePreview }}</pre
                     >
@@ -6321,14 +6426,20 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <div
                     v-if="activeCellDetail.displayValuePreview !== activeCellDetail.rawValuePreview"
                     class="space-y-1"
+                    :class="cellDetailPanelIsBottom ? 'min-h-0' : ''"
                   >
                     <div class="text-muted-foreground">{{ t("grid.rawValue") }}</div>
                     <pre
-                      class="max-h-40 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
+                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
+                      :class="cellDetailPanelIsBottom ? 'max-h-36' : 'max-h-40'"
                       >{{ activeCellDetail.rawValuePreview }}</pre
                     >
                   </div>
-                  <div v-if="activeCellDetail.formattedJson" class="mt-2 space-y-1">
+                  <div
+                    v-if="activeCellDetail.formattedJson"
+                    class="mt-2 space-y-1"
+                    :class="cellDetailPanelIsBottom ? 'min-h-0' : ''"
+                  >
                     <div class="flex items-center justify-between gap-2">
                       <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
                       <Button
@@ -6342,13 +6453,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       </Button>
                     </div>
                     <pre
-                      class="max-h-72 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
+                      class="overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
+                      :class="cellDetailPanelIsBottom ? 'max-h-36' : 'max-h-72'"
                       >{{ activeCellDetail.formattedJson }}</pre
                     >
                   </div>
                 </div>
 
-                <div class="border-t p-2 grid grid-cols-1 gap-1">
+                <div
+                  class="border-t p-2 grid gap-1"
+                  :class="cellDetailPanelIsBottom ? 'grid-cols-[repeat(3,max-content)] justify-end' : 'grid-cols-1'"
+                >
                   <Button
                     v-if="activeCellDetail.isEditable && activeCellDetail.value !== null"
                     variant="ghost"

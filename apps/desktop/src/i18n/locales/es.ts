@@ -511,6 +511,8 @@ export default {
     pendingChanges: "{count} pendientes",
     selectedCells: "{count} seleccionadas",
     cellDetails: "Detalles de celda",
+    cellDetailLayoutBottom: "Mover abajo",
+    cellDetailLayoutRight: "Mover a la derecha",
     openCellDetailsDialog: "Abrir detalles de celda",
     rowDetails: "Detalles de fila",
     rowDetailsFor: "Detalles de fila {row}",

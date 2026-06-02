@@ -183,6 +183,8 @@ export type EditorTheme =
 
 const STRUCTURE_EDITOR_DENSITIES = ["compact", "standard", "comfortable"] as const;
 export type StructureEditorDensity = (typeof STRUCTURE_EDITOR_DENSITIES)[number];
+const CELL_DETAIL_PANEL_LAYOUTS = ["bottom", "right"] as const;
+export type CellDetailPanelLayout = (typeof CELL_DETAIL_PANEL_LAYOUTS)[number];
 
 export interface EditorSettings {
   fontFamily: string;
@@ -201,6 +203,7 @@ export interface EditorSettings {
   structureEditorDensity: StructureEditorDensity;
   tableInfoDrawerWidth: number;
   cellDetailDrawerWidth: number;
+  cellDetailPanelLayout: CellDetailPanelLayout;
   shortcuts: ShortcutSettings;
   sidebarActivation: SidebarActivation;
   sidebarObjectDisplay: "grouped" | "simple";
@@ -255,6 +258,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   structureEditorDensity: "compact",
   tableInfoDrawerWidth: 320,
   cellDetailDrawerWidth: 320,
+  cellDetailPanelLayout: "bottom",
   shortcuts: normalizeShortcutSettings(),
   sidebarActivation: "single",
   sidebarObjectDisplay: "grouped",
@@ -286,6 +290,12 @@ function normalizeStructureEditorDensity(value: unknown): StructureEditorDensity
   return STRUCTURE_EDITOR_DENSITIES.includes(value as StructureEditorDensity)
     ? (value as StructureEditorDensity)
     : DEFAULT_EDITOR_SETTINGS.structureEditorDensity;
+}
+
+function normalizeCellDetailPanelLayout(value: unknown): CellDetailPanelLayout {
+  return CELL_DETAIL_PANEL_LAYOUTS.includes(value as CellDetailPanelLayout)
+    ? (value as CellDetailPanelLayout)
+    : DEFAULT_EDITOR_SETTINGS.cellDetailPanelLayout;
 }
 
 function normalizeColumnFormatters(value: unknown): Record<string, ColumnFormatterConfig> {
@@ -362,6 +372,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       260,
       DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth,
     ),
+    cellDetailPanelLayout: normalizeCellDetailPanelLayout(settings.cellDetailPanelLayout),
     shortcuts: normalizeShortcutSettings(settings.shortcuts),
     sidebarActivation:
       settings.sidebarActivation === "single" || settings.sidebarActivation === "double"
@@ -500,6 +511,8 @@ export const useSettingsStore = defineStore("settings", () => {
       editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, 320);
     if (partial.cellDetailDrawerWidth !== undefined)
       editorSettings.value.cellDetailDrawerWidth = normalizeDrawerWidth(partial.cellDetailDrawerWidth, 260, 320);
+    if (partial.cellDetailPanelLayout !== undefined)
+      editorSettings.value.cellDetailPanelLayout = normalizeCellDetailPanelLayout(partial.cellDetailPanelLayout);
     if (partial.shortcuts !== undefined) editorSettings.value.shortcuts = normalizeShortcutSettings(partial.shortcuts);
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
     if (partial.sidebarObjectDisplay !== undefined)

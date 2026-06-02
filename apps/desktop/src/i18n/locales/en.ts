@@ -545,6 +545,8 @@ export default {
     pendingChanges: "{count} pending",
     selectedCells: "{count} selected",
     cellDetails: "Cell Details",
+    cellDetailLayoutBottom: "Move to Bottom",
+    cellDetailLayoutRight: "Move to Right",
     openCellDetailsDialog: "Open Cell Details",
     rowDetails: "Row Details",
     rowDetailsFor: "Row {row} Details",

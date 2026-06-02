@@ -540,6 +540,8 @@ export default {
     pendingChanges: "{count} 项待保存",
     selectedCells: "已选 {count} 个单元格",
     cellDetails: "单元格详情",
+    cellDetailLayoutBottom: "移动到底部",
+    cellDetailLayoutRight: "移动到右侧",
     openCellDetailsDialog: "单元格详情",
     rowDetails: "行详情",
     rowDetailsFor: "第 {row} 行详情",

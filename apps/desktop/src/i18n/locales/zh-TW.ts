@@ -540,6 +540,8 @@ export default {
     pendingChanges: "{count} 項待儲存",
     selectedCells: "已選 {count} 個儲存格",
     cellDetails: "儲存格詳情",
+    cellDetailLayoutBottom: "移到底部",
+    cellDetailLayoutRight: "移到右側",
     openCellDetailsDialog: "儲存格詳情",
     rowDetails: "資料詳情",
     rowDetailsFor: "第 {row} 筆資料詳情",
