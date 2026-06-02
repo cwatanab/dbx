@@ -1079,11 +1079,13 @@ mod tests {
         config.port = 1521;
         config.username = "system".to_string();
         config.password = "oracle".to_string();
+        config.sysdba = true;
         config.oracle_connection_type = Some("service_name".to_string());
 
         let params = agent_connect_params(&config, "oracle.example.com", 1521, "ORCLPDB1");
 
         assert_eq!(params["database"], "ORCLPDB1");
+        assert_eq!(params["sysdba"], true);
         assert_eq!(params["connection_string"], "jdbc:oracle:thin:@//oracle.example.com:1521/ORCLPDB1");
     }
 

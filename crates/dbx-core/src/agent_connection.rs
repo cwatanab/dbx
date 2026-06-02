@@ -26,6 +26,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "database": agent_database,
         "username": config.username,
         "password": config.password,
+        "sysdba": config.sysdba,
         "url_params": config.url_params.as_deref().unwrap_or(""),
         "connection_string": connection_string,
     })

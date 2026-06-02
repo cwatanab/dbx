@@ -123,6 +123,20 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void oracleSysdbaIsMappedToInternalLogonProperty() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("applyOracleProperties", JsonNode.class, Properties.class);
+        method.setAccessible(true);
+        Properties properties = new Properties();
+        JsonNode connection = MAPPER.readTree("""
+            { "sysdba": true }
+            """);
+
+        method.invoke(null, connection, properties);
+
+        assertEquals("sysdba", properties.getProperty("internal_logon"));
+    }
+
+    @Test
     void driverQuirksDetectYashanJdbcUrl() throws Exception {
         JsonNode yashan = MAPPER.readTree("""
             {

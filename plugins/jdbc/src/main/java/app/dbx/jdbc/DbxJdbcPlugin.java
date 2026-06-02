@@ -218,10 +218,7 @@ public final class DbxJdbcPlugin {
         }
         applyConnectTimeout(connection, properties);
         if (isOracleUrl(url)) {
-            properties.putIfAbsent("remarksReporting", "false");
-            properties.putIfAbsent("restrictGetTables", "true");
-            properties.putIfAbsent("includeSynonyms", "false");
-            properties.putIfAbsent("oracle.jdbc.defaultRowPrefetch", "100");
+            applyOracleProperties(connection, properties);
         }
         sharedConnection = DriverManager.getConnection(url, properties);
         sharedConnectionKey = key;
@@ -234,6 +231,16 @@ public final class DbxJdbcPlugin {
         String value = Integer.toString(connectTimeoutSecs);
         properties.putIfAbsent("loginTimeout", value);
         properties.putIfAbsent("connectTimeout", value);
+    }
+
+    private static void applyOracleProperties(JsonNode connection, Properties properties) {
+        properties.putIfAbsent("remarksReporting", "false");
+        properties.putIfAbsent("restrictGetTables", "true");
+        properties.putIfAbsent("includeSynonyms", "false");
+        properties.putIfAbsent("oracle.jdbc.defaultRowPrefetch", "100");
+        if (connection.path("sysdba").asBoolean(false)) {
+            properties.putIfAbsent("internal_logon", "sysdba");
+        }
     }
 
     private static JsonNode executeQuery(
@@ -579,7 +586,10 @@ public final class DbxJdbcPlugin {
     }
 
     private static String connectionKey(JsonNode connection) {
-        return optionalText(connection, "connection_string") + "|" + optionalText(connection, "username") + "|" + optionalText(connection, "password");
+        return optionalText(connection, "connection_string")
+            + "|" + optionalText(connection, "username")
+            + "|" + optionalText(connection, "password")
+            + "|" + connection.path("sysdba").asBoolean(false);
     }
 
     private static Set<String> primaryKeys(DatabaseMetaData meta, String database, String schema, String table) throws SQLException {
