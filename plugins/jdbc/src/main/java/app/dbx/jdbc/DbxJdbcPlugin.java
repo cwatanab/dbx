@@ -554,18 +554,16 @@ public final class DbxJdbcPlugin {
         try (ResultSet rs = meta.getColumns(catalog, schema, table, "%")) {
             while (rs.next()) {
                 String name = rs.getString("COLUMN_NAME");
-                ObjectNode item = MAPPER.createObjectNode();
-                item.put("name", name);
+                ObjectNode item = columnNode(result, name);
                 item.put("data_type", rs.getString("TYPE_NAME"));
                 item.put("is_nullable", rs.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls);
-                putNullable(item, "column_default", rs.getString("COLUMN_DEF"));
+                putNullablePreferValue(item, "column_default", rs.getString("COLUMN_DEF"));
                 item.put("is_primary_key", primaryKeys.contains(name));
                 item.putNull("extra");
-                putNullable(item, "comment", rs.getString("REMARKS"));
+                putNullablePreferValue(item, "comment", rs.getString("REMARKS"));
                 putNullableInt(item, "numeric_precision", rs.getObject("COLUMN_SIZE"));
                 putNullableInt(item, "numeric_scale", rs.getObject("DECIMAL_DIGITS"));
                 putNullableInt(item, "character_maximum_length", rs.getObject("COLUMN_SIZE"));
-                result.add(item);
             }
         }
     }
@@ -867,18 +865,16 @@ public final class DbxJdbcPlugin {
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     String name = rs.getString("column_name");
-                    ObjectNode item = MAPPER.createObjectNode();
-                    item.put("name", name);
+                    ObjectNode item = columnNode(result, name);
                     item.put("data_type", rs.getString("data_type"));
                     item.put("is_nullable", !"N".equals(rs.getString("nullable")));
-                    putNullable(item, "column_default", rs.getString("data_default"));
+                    putNullablePreferValue(item, "column_default", rs.getString("data_default"));
                     item.put("is_primary_key", pks.contains(name));
                     item.putNull("extra");
-                    putNullable(item, "comment", rs.getString("comments"));
+                    putNullablePreferValue(item, "comment", rs.getString("comments"));
                     putNullableInt(item, "numeric_precision", rs.getObject("data_precision"));
                     putNullableInt(item, "numeric_scale", rs.getObject("data_scale"));
                     putNullableInt(item, "character_maximum_length", rs.getObject("char_length"));
-                    result.add(item);
                 }
             }
         }
@@ -953,6 +949,28 @@ public final class DbxJdbcPlugin {
         } else {
             node.put(field, value);
         }
+    }
+
+    private static ObjectNode columnNode(ArrayNode result, String name) {
+        for (JsonNode node : result) {
+            if (name.equals(node.path("name").asText()) && node instanceof ObjectNode objectNode) {
+                return objectNode;
+            }
+        }
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", name);
+        result.add(item);
+        return item;
+    }
+
+    private static void putNullablePreferValue(ObjectNode node, String field, String value) {
+        if (value == null || value.isBlank()) {
+            if (!node.has(field)) {
+                node.putNull(field);
+            }
+            return;
+        }
+        node.put(field, value);
     }
 
     private static void putNullableInt(ObjectNode node, String field, Object value) {

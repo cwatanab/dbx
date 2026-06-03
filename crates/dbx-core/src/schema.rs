@@ -458,8 +458,24 @@ fn filter_table_infos(tables: Vec<db::TableInfo>, filter: Option<&str>, limit: O
 #[cfg(test)]
 mod tests {
     use super::{
-        clickhouse_metadata_database, duckdb_attach_database, duckdb_list_databases, duckdb_query_tables_in_database,
+        clickhouse_metadata_database, deduplicate_column_infos, duckdb_attach_database, duckdb_list_databases,
+        duckdb_query_tables_in_database,
     };
+
+    fn test_column(name: &str, comment: Option<&str>, is_primary_key: bool) -> super::db::ColumnInfo {
+        super::db::ColumnInfo {
+            name: name.to_string(),
+            data_type: "VARCHAR".to_string(),
+            is_nullable: true,
+            column_default: None,
+            is_primary_key,
+            extra: None,
+            comment: comment.map(|value| value.to_string()),
+            numeric_precision: None,
+            numeric_scale: None,
+            character_maximum_length: None,
+        }
+    }
 
     #[test]
     fn duckdb_list_databases_includes_attached_database() {
@@ -504,6 +520,23 @@ mod tests {
         assert_eq!(clickhouse_metadata_database("", "testdb"), "testdb");
         assert_eq!(clickhouse_metadata_database("testdb", ""), "testdb");
         assert_eq!(clickhouse_metadata_database("default", "testdb"), "default");
+    }
+
+    #[test]
+    fn deduplicates_columns_and_preserves_later_comment() {
+        let columns = deduplicate_column_infos(vec![
+            test_column("ID", None, false),
+            test_column("ID", Some("源主键"), true),
+            test_column("TFBH", Some(""), false),
+            test_column("TFBH", Some("台账编号"), false),
+        ]);
+
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].name, "ID");
+        assert_eq!(columns[0].comment.as_deref(), Some("源主键"));
+        assert!(columns[0].is_primary_key);
+        assert_eq!(columns[1].name, "TFBH");
+        assert_eq!(columns[1].comment.as_deref(), Some("台账编号"));
     }
 }
 
@@ -729,7 +762,7 @@ pub async fn get_columns_core(
             let config = config.clone();
             let session = session.clone();
             drop(connections);
-            return session
+            let columns = session
                 .invoke::<Vec<db::ColumnInfo>>(
                     "getColumns",
                     serde_json::json!({
@@ -739,7 +772,8 @@ pub async fn get_columns_core(
                         "table": table,
                     }),
                 )
-                .await;
+                .await?;
+            return Ok(deduplicate_column_infos(columns));
         }
         if let Some(con) = extract_pool!(&connections, &pool_key, DuckDb) {
             drop(connections);
@@ -755,10 +789,16 @@ pub async fn get_columns_core(
         if let Some(client) = extract_pool!(&connections, &pool_key, ClickHouse) {
             drop(connections);
             return db::clickhouse_driver::get_columns(&client, clickhouse_metadata_database(database, schema), table)
-                .await;
+                .await
+                .map(deduplicate_column_infos);
         }
         try_sqlserver!(connections, &pool_key, get_columns, schema, table);
-        try_agent!(connections, &pool_key, get_columns, database, schema, table);
+        if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+            drop(connections);
+            let mut client = client.lock().await;
+            let columns = client.get_columns::<Vec<db::ColumnInfo>>(database, schema, table).await?;
+            return Ok(deduplicate_column_infos(columns));
+        }
     }
 
     let connections = state.connections.read().await;
@@ -767,10 +807,54 @@ pub async fn get_columns_core(
     match pool {
         PoolKind::Mysql(p, mode) => {
             dispatch_mysql!(p, mode, db::mysql::get_columns, db::ob_oracle::get_columns, database, table)
+                .map(deduplicate_column_infos)
         }
-        PoolKind::Postgres(p) => db::postgres::get_columns(p, schema, table).await,
-        PoolKind::Sqlite(p) => db::sqlite::get_columns(p, schema, table).await,
+        PoolKind::Postgres(p) => db::postgres::get_columns(p, schema, table).await.map(deduplicate_column_infos),
+        PoolKind::Sqlite(p) => db::sqlite::get_columns(p, schema, table).await.map(deduplicate_column_infos),
         _ => Ok(vec![]),
+    }
+}
+
+fn deduplicate_column_infos(columns: Vec<db::ColumnInfo>) -> Vec<db::ColumnInfo> {
+    let mut result: Vec<db::ColumnInfo> = Vec::with_capacity(columns.len());
+    for column in columns {
+        if let Some(existing) = result.iter_mut().find(|existing| existing.name == column.name) {
+            existing.is_primary_key |= column.is_primary_key;
+            existing.is_nullable &= column.is_nullable;
+            merge_optional_string(&mut existing.column_default, column.column_default);
+            merge_optional_string(&mut existing.extra, column.extra);
+            merge_optional_string(&mut existing.comment, column.comment);
+            if existing.numeric_precision.is_none() {
+                existing.numeric_precision = column.numeric_precision;
+            }
+            if existing.numeric_scale.is_none() {
+                existing.numeric_scale = column.numeric_scale;
+            }
+            if existing.character_maximum_length.is_none() {
+                existing.character_maximum_length = column.character_maximum_length;
+            }
+            if existing.data_type.trim().is_empty() && !column.data_type.trim().is_empty() {
+                existing.data_type = column.data_type;
+            }
+        } else {
+            result.push(column);
+        }
+    }
+    result
+}
+
+fn merge_optional_string(target: &mut Option<String>, candidate: Option<String>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if candidate.trim().is_empty() {
+        if target.is_none() {
+            *target = Some(candidate);
+        }
+        return;
+    }
+    if target.as_ref().map_or(true, |value| value.trim().is_empty()) {
+        *target = Some(candidate);
     }
 }
 
