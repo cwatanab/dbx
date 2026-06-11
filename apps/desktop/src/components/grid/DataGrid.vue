@@ -3729,9 +3729,11 @@ function canvasEditingCellViewportRect() {
 function canvasEditingCellIsVisible() {
   const rect = canvasEditingCellViewportRect();
   if (!rect) return false;
+  const viewportWidth = canvasEffectiveViewportWidth();
+  const viewportHeight = canvasEffectiveViewportHeight();
   const clippedLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, rect.left);
-  const clippedRight = Math.min(canvasViewportWidth.value, rect.left + rect.width);
-  return rect.top + rect.height > 0 && rect.top < canvasViewportHeight.value && clippedRight - clippedLeft > 0;
+  const clippedRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
+  return rect.top + rect.height > 0 && rect.top < viewportHeight && clippedRight - clippedLeft > 0;
 }
 
 function commitHiddenCanvasEditBeforeCellInteraction() {
@@ -3763,11 +3765,30 @@ const canvasSingleSelectedCell = computed(() => {
   return { rowIndex: range.startRow, visibleColIdx: range.startCol };
 });
 
+function canvasEffectiveViewportWidth(): number {
+  return canvasViewportWidth.value || canvasScrollerElement()?.clientWidth || 0;
+}
+
+function canvasEffectiveViewportHeight(): number {
+  return canvasViewportHeight.value || canvasScrollerElement()?.clientHeight || 0;
+}
+
+const canvasOverlayStyle = computed(() => {
+  const vw = canvasEffectiveViewportWidth();
+  const vh = canvasEffectiveViewportHeight();
+  return {
+    width: `${vw}px`,
+    height: `${vh}px`,
+    marginTop: `-${vh}px`,
+  };
+});
+
 const canvasEditingCellStyle = computed(() => {
   const cell = canvasEditingCell.value;
   if (!cell) return {};
+  const viewportWidth = canvasEffectiveViewportWidth();
   const clippedLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, cell.rect.left);
-  const clippedRight = Math.min(canvasViewportWidth.value, cell.rect.left + cell.rect.width);
+  const clippedRight = viewportWidth > 0 ? Math.min(viewportWidth, cell.rect.left + cell.rect.width) : cell.rect.left + cell.rect.width;
   return {
     left: `${clippedLeft}px`,
     top: `${cell.rect.top}px`,
@@ -3784,11 +3805,13 @@ const canvasDetailButtonCell = computed(() => {
   if (visibleColIdx < 0) return null;
   const rect = canvasCellViewportRect(target.rowIndex, visibleColIdx);
   if (!rect) return null;
+  const viewportWidth = canvasEffectiveViewportWidth();
+  const viewportHeight = canvasEffectiveViewportHeight();
   const visibleLeft = Math.max(DATA_GRID_ROW_NUM_WIDTH, rect.left);
-  const visibleRight = Math.min(canvasViewportWidth.value, rect.left + rect.width);
+  const visibleRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
   const canQuickDownload = canQuickDownloadCellValue(target.rowIndex, target.col);
   const minWidth = canQuickDownload ? 46 : 24;
-  if (rect.top < 0 || rect.top > canvasViewportHeight.value - 1 || visibleRight - visibleLeft < minWidth) return null;
+  if (rect.top < 0 || rect.top > viewportHeight - 1 || visibleRight - visibleLeft < minWidth) return null;
   return { rowIndex: target.rowIndex, visibleColIdx, actualColIdx: target.col, rect, canQuickDownload };
 });
 
@@ -6700,15 +6723,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     @contextmenu="onCanvasContext"
                     @dblclick="onCanvasDblClick"
                   />
-                  <div
-                    ref="canvasOverlayRef"
-                    class="canvas-grid-overlay sticky left-0 top-0 z-10 overflow-hidden"
-                    :style="{
-                      width: `${canvasViewportWidth}px`,
-                      height: `${canvasViewportHeight}px`,
-                      marginTop: `-${canvasViewportHeight}px`,
-                    }"
-                  >
+                  <div ref="canvasOverlayRef" class="canvas-grid-overlay sticky left-0 top-0 z-10 overflow-hidden" :style="canvasOverlayStyle">
                     <div v-if="canvasEditingCell" class="absolute pointer-events-auto z-20" :class="{ 'tabular-nums': canvasEditingCellIsNumeric }" :style="canvasEditingCellStyle" @mousedown.stop @click.stop>
                       <TemporalCellEditor v-if="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)" v-model="editValue" :kind="temporalEditorKindForColumn(canvasEditingCell.actualColIdx)!" @cancel="cancelEdit" @commit="commitGridEdit" />
                       <EnumCellEditor
