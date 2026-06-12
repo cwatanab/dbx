@@ -229,6 +229,14 @@ function appendAssistantReasoning(assistantIdx: number, delta: string) {
 }
 
 const expandedReasoning = ref<Set<number>>(new Set());
+const expandedSteps = ref<Set<string>>(new Set());
+
+function toggleStep(key: string) {
+  const next = new Set(expandedSteps.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  expandedSteps.value = next;
+}
 
 function agentStepIcon(tone: AiAgentStepTone) {
   if (tone === "danger") return CircleSlash;
@@ -787,19 +795,17 @@ const messageRenderer = computed(() => {
                 </div>
               </div>
               <div v-if="msg.agentSteps?.length" class="mb-2 space-y-1">
-                <div v-for="step in msg.agentSteps" :key="step.key" class="rounded border px-2 py-1.5 text-[10px]" :class="agentStepClass(step.tone)">
-                  <div class="flex items-center gap-1">
+                <div v-for="step in msg.agentSteps" :key="step.key" class="rounded border text-[10px]" :class="agentStepClass(step.tone)">
+                  <button class="flex w-full items-center gap-1 px-2 py-1.5 text-left" @click="step.toolResult || step.toolArgs?.sql ? toggleStep(step.key) : undefined">
                     <component :is="agentStepIcon(step.tone)" class="h-3 w-3 shrink-0" />
                     <span class="font-medium">{{ t(step.labelKey) }}</span>
                     <span v-if="step.toolName" class="text-muted-foreground">: {{ step.toolName }}</span>
-                  </div>
-                  <!-- Show SQL query for execute_query/get_sample_data -->
-                  <div v-if="step.toolArgs?.sql" class="mt-1 rounded bg-background/50 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap">{{ step.toolArgs.sql }}</div>
-                  <!-- Show error message -->
-                  <div v-if="step.isError && step.toolResult" class="mt-1 text-[10px] text-red-600 dark:text-red-400">{{ step.toolResult }}</div>
-                  <!-- Show result preview for successful queries -->
-                  <div v-else-if="step.toolResult && step.toolName === 'execute_query'" class="mt-1 overflow-x-auto">
-                    <div class="text-[10px] text-muted-foreground whitespace-pre-wrap max-h-32 overflow-y-auto">{{ step.toolResult }}</div>
+                    <ChevronRight v-if="step.toolResult || step.toolArgs?.sql" class="ml-auto h-3 w-3 shrink-0 transition-transform duration-150" :class="{ 'rotate-90': expandedSteps.has(step.key) }" />
+                  </button>
+                  <div v-if="expandedSteps.has(step.key)" class="border-t border-current/10 px-2 pb-2 pt-1">
+                    <div v-if="step.toolArgs?.sql" class="mb-1 rounded bg-background/50 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap">{{ step.toolArgs.sql }}</div>
+                    <div v-if="step.isError && step.toolResult" class="text-[10px] text-red-600 dark:text-red-400">{{ step.toolResult }}</div>
+                    <div v-else-if="step.toolResult" class="max-h-48 overflow-auto text-[10px] text-muted-foreground whitespace-pre-wrap">{{ step.toolResult }}</div>
                   </div>
                 </div>
               </div>
