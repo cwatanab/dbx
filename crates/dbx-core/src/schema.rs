@@ -2471,7 +2471,15 @@ pub async fn get_columns_core(
             }
             PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(is_doris_family_config) => {
                 let metadata_database = mysql_show_metadata_database_for_config(db_config.as_ref(), database);
-                db::mysql::get_columns_show(p, metadata_database, table).await.map(deduplicate_column_infos)
+                // Doris/StarRocks previously went straight to `SHOW COLUMNS` for
+                // speed (see perf(doris) commit), but `SHOW COLUMNS` reports the
+                // `Key` column as `YES`/`NO` rather than MySQL's `PRI`, so primary
+                // keys were never detected. `get_columns` queries
+                // information_schema.COLUMNS first — where `COLUMN_KEY = 'PRI'`
+                // correctly identifies primary keys (and only real primary keys,
+                // not duplicate-key sort columns) — and falls back to `SHOW COLUMNS`
+                // automatically when information_schema is unavailable.
+                db::mysql::get_columns(p, metadata_database, table).await.map(deduplicate_column_infos)
             }
             PoolKind::Mysql(p, mode) => {
                 dispatch_mysql!(p, mode, db::mysql::get_columns, db::ob_oracle::get_columns, database, table)
