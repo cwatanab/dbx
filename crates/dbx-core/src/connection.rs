@@ -809,7 +809,7 @@ impl AppState {
                     )
                 } else if db_config.uses_redis_sentinel() {
                     db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
-                        db::redis_driver::connect_sentinel(&db_config).await?,
+                        self.connect_redis_sentinel(connection_id, &db_config).await?,
                     ))
                 } else {
                     db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
@@ -1091,6 +1091,129 @@ impl AppState {
         .await?;
 
         Ok(("127.0.0.1".to_string(), local_port))
+    }
+
+    pub async fn connect_redis_sentinel(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<redis::aio::MultiplexedConnection, String> {
+        let transport_layers = config.effective_transport_layers();
+        if transport_layers.is_empty() {
+            return db::redis_driver::connect_sentinel(config).await;
+        }
+
+        let result = async {
+            let sentinel_nodes = db::redis_driver::redis_sentinel_node_endpoints(config)?;
+            let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
+            let layer_count = transport_layers.len();
+            let mut last_error = None;
+
+            for sentinel in sentinel_nodes {
+                let sentinel_tunnel_id = redis_sentinel_transport_id(connection_id, "sentinel", &sentinel);
+                let sentinel_local_port = match db::transport_layer_tunnel::start_transport_layers(
+                    &sentinel_tunnel_id,
+                    &transport_layers,
+                    &sentinel.host,
+                    sentinel.port,
+                    &self.tunnels,
+                    &self.proxy_tunnels,
+                )
+                .await
+                {
+                    Ok(port) => port,
+                    Err(err) => {
+                        last_error =
+                            Some(format!("Redis Sentinel {}:{} transport failed: {err}", sentinel.host, sentinel.port));
+                        continue;
+                    }
+                };
+
+                let master =
+                    match db::redis_driver::discover_sentinel_master(config, "127.0.0.1", sentinel_local_port).await {
+                        Ok(master) => master,
+                        Err(err) => {
+                            last_error = Some(format!(
+                                "Redis Sentinel {}:{} master lookup failed: {err}",
+                                sentinel.host, sentinel.port
+                            ));
+                            db::transport_layer_tunnel::stop_transport_layers(
+                                &sentinel_tunnel_id,
+                                layer_count,
+                                &self.tunnels,
+                                &self.proxy_tunnels,
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+
+                let master_tunnel_id = redis_sentinel_transport_id(connection_id, "master", &master);
+                let master_local_port = match db::transport_layer_tunnel::start_transport_layers(
+                    &master_tunnel_id,
+                    &transport_layers,
+                    &master.host,
+                    master.port,
+                    &self.tunnels,
+                    &self.proxy_tunnels,
+                )
+                .await
+                {
+                    Ok(port) => port,
+                    Err(err) => {
+                        last_error = Some(format!(
+                            "Redis Sentinel master {}:{} transport failed: {err}",
+                            master.host, master.port
+                        ));
+                        db::transport_layer_tunnel::stop_transport_layers(
+                            &sentinel_tunnel_id,
+                            layer_count,
+                            &self.tunnels,
+                            &self.proxy_tunnels,
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
+                match db::redis_driver::connect_standalone(config, "127.0.0.1", master_local_port, connect_timeout)
+                    .await
+                {
+                    Ok(con) => return Ok(con),
+                    Err(err) => {
+                        last_error = Some(format!(
+                            "Redis Sentinel master {}:{} connection failed: {err}",
+                            master.host, master.port
+                        ));
+                        db::transport_layer_tunnel::stop_transport_layers(
+                            &master_tunnel_id,
+                            layer_count,
+                            &self.tunnels,
+                            &self.proxy_tunnels,
+                        )
+                        .await;
+                        db::transport_layer_tunnel::stop_transport_layers(
+                            &sentinel_tunnel_id,
+                            layer_count,
+                            &self.tunnels,
+                            &self.proxy_tunnels,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            Err(last_error.unwrap_or_else(|| "Redis Sentinel master discovery failed".to_string()))
+        }
+        .await;
+
+        if result.is_err() {
+            let redis_sentinel_prefix = redis_sentinel_transport_prefix(connection_id);
+            self.tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
+            self.proxy_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
+        }
+
+        result
     }
 
     pub async fn connect_redis_cluster(
@@ -1584,6 +1707,9 @@ impl AppState {
         let redis_cluster_prefix = redis_cluster_transport_prefix(connection_id);
         self.tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
+        let redis_sentinel_prefix = redis_sentinel_transport_prefix(connection_id);
+        self.tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
+        self.proxy_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         db::transport_layer_tunnel::stop_transport_layers(
             connection_id,
             layer_count,
@@ -2051,6 +2177,23 @@ fn redis_cluster_transport_id(connection_id: &str, endpoint: &db::redis_driver::
     )
 }
 
+fn redis_sentinel_transport_prefix(connection_id: &str) -> String {
+    format!("{connection_id}:redis-sentinel:")
+}
+
+fn redis_sentinel_transport_id(
+    connection_id: &str,
+    role: &str,
+    endpoint: &db::redis_driver::RedisNodeEndpoint,
+) -> String {
+    format!(
+        "{}{role}:{host}:{port}",
+        redis_sentinel_transport_prefix(connection_id),
+        host = endpoint.host,
+        port = endpoint.port
+    )
+}
+
 fn session_scoped_pool_key(base_pool_key: String, client_session_id: Option<&str>) -> String {
     normalize_client_session_id(client_session_id)
         .map(|session| format!("{base_pool_key}:session:{session}"))
@@ -2430,8 +2573,9 @@ mod tests {
     use super::{
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
         metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_setup_queries,
-        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_h2_database_path, AppState, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
+        redis_sentinel_transport_prefix, uses_bare_mysql_pool, uses_tcp_probe, validate_h2_database_path, AppState,
+        PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -3223,6 +3367,17 @@ mod tests {
         assert_eq!(
             super::session_scoped_pool_key_for(Some(DatabaseType::DuckDb), "duckdb-conn".to_string(), Some("tab-1")),
             "duckdb-conn"
+        );
+    }
+
+    #[test]
+    fn redis_sentinel_transport_ids_are_connection_scoped_by_role_and_endpoint() {
+        let endpoint = db::redis_driver::RedisNodeEndpoint { host: "10.0.0.8".to_string(), port: 6379 };
+
+        assert_eq!(redis_sentinel_transport_prefix("redis-prod"), "redis-prod:redis-sentinel:");
+        assert_eq!(
+            redis_sentinel_transport_id("redis-prod", "master", &endpoint),
+            "redis-prod:redis-sentinel:master:10.0.0.8:6379"
         );
     }
 

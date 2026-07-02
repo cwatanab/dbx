@@ -559,7 +559,8 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                     state.connect_redis_cluster(&tunnel_id, &config).await?;
                     return Ok("Connection successful".to_string());
                 } else if config.uses_redis_sentinel() {
-                    db::redis_driver::connect_sentinel(&config).await?
+                    state.connect_redis_sentinel(&tunnel_id, &config).await?;
+                    return Ok("Connection successful".to_string());
                 } else {
                     db::redis_driver::connect(&url, connect_timeout).await?
                 };
@@ -835,7 +836,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 ))
             } else if db_config.uses_redis_sentinel() {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
-                    db::redis_driver::connect_sentinel(&db_config).await?,
+                    state.connect_redis_sentinel(&id, &db_config).await?,
                 )))
             } else {
                 PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
