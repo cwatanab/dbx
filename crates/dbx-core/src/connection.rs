@@ -505,10 +505,6 @@ impl AppState {
         }
     }
 
-    fn duckdb_worker_process_isolation_enabled(&self) -> bool {
-        self.duckdb_worker_process_isolation.load(Ordering::Relaxed)
-    }
-
     pub async fn test_external_driver(&self, driver_id: &str, config: &ConnectionConfig) -> Result<String, String> {
         let params = serde_json::json!({ "connection": config });
         let env = self.external_driver_runtime_env(driver_id)?;
@@ -944,7 +940,7 @@ impl AppState {
             }
             #[cfg(feature = "duckdb-bundled")]
             DatabaseType::DuckDb => {
-                if self.duckdb_worker_process_isolation_enabled() {
+                if self.duckdb_worker_process_isolation.load(Ordering::Relaxed) {
                     let attached_databases = db_config
                         .attached_databases
                         .iter()
@@ -1770,7 +1766,7 @@ impl AppState {
 
     #[cfg(feature = "duckdb-bundled")]
     async fn remove_pool_if_duckdb_isolation_mismatch(&self, pool_key: &str) -> bool {
-        let isolation_enabled = self.duckdb_worker_process_isolation_enabled();
+        let isolation_enabled = self.duckdb_worker_process_isolation.load(Ordering::Relaxed);
         let mismatch = {
             let connections = self.connections.read().await;
             match connections.get(pool_key) {
