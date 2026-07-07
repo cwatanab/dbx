@@ -1023,8 +1023,10 @@ function isSqlServerLegacyUnencryptedMode(params: string | undefined): boolean {
   if (!normalized) return false;
   const parsed = new URLSearchParams(normalized);
   for (const [key, value] of parsed.entries()) {
-    if (key.trim().toLowerCase() === "sqlserverencryption") {
-      return ["disabled", "disable", "false", "0", "off"].includes(value.trim().toLowerCase());
+    const normalizedKey = key.trim().toLowerCase();
+    if (normalizedKey === "sqlserverencryption" || normalizedKey === "encrypt") {
+      // Accept JDBC-style `encrypt=false` from imported SQL Server URLs as the same opt-in.
+      if (["disabled", "disable", "false", "0", "off", "no"].includes(value.trim().toLowerCase())) return true;
     }
   }
   return false;
@@ -1032,7 +1034,13 @@ function isSqlServerLegacyUnencryptedMode(params: string | undefined): boolean {
 
 function setSqlServerLegacyUnencryptedMode(params: string | undefined, enabled: boolean): string {
   const normalized = (params || "").trim().replace(/^\?/, "").replace(/;/g, "&");
-  return setUrlParam(normalized, "sqlserverEncryption", enabled ? "disabled" : "");
+  const parsed = new URLSearchParams(normalized);
+  for (const key of Array.from(parsed.keys())) {
+    const normalizedKey = key.trim().toLowerCase();
+    if (normalizedKey === "sqlserverencryption" || normalizedKey === "encrypt") parsed.delete(key);
+  }
+  if (enabled) parsed.set("sqlserverEncryption", "disabled");
+  return parsed.toString();
 }
 
 function isSqlServerTlsHandshakeFailure(message: string): boolean {
