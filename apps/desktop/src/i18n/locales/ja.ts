@@ -75,7 +75,6 @@ export default withEnglishFallback({
     restart: "終了して再起動",
     restartFailed: "アプリの再起動に失敗しました: {error}",
     exitAndUpdate: "終了してアップデート",
-    reopenHint: "アップデート完了のためアプリが再起動します",
     dockerUsersRun: "Dockerユーザーは以下を実行してください",
     toUpdate: "更新するには",
   },

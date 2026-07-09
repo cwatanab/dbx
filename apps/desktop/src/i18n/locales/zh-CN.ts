@@ -75,7 +75,6 @@ export default withEnglishFallback({
     restart: "退出并重启",
     restartFailed: "重启应用失败：{error}",
     exitAndUpdate: "退出并更新",
-    reopenHint: "应用将自动重启以完成更新",
     dockerUsersRun: "Docker 用户请运行",
     toUpdate: "更新",
   },

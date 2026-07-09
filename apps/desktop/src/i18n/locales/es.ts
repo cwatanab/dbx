@@ -75,7 +75,6 @@ export default withEnglishFallback({
     restart: "Salir y reiniciar",
     restartFailed: "Error al reiniciar la aplicación: {error}",
     exitAndUpdate: "Salir y actualizar",
-    reopenHint: "La aplicación se reiniciará para completar la actualización",
     dockerUsersRun: "Los usuarios de Docker deben ejecutar",
     toUpdate: "para actualizar",
   },

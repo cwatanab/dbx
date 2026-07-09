@@ -73,7 +73,6 @@ export default {
     restart: "Exit & Restart",
     restartFailed: "Failed to restart app: {error}",
     exitAndUpdate: "Exit & Update",
-    reopenHint: "The app will relaunch to finish updating",
     dockerUsersRun: "Docker users should run",
     toUpdate: "to update",
   },
