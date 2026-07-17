@@ -120,6 +120,10 @@ export default {
     renameFile: "Rename SQL",
     deleteFile: "Delete SQL",
     deleteFileConfirm: "Delete “{name}”?",
+    createFolderOption: "Create folder “{name}”",
+    folderPlaceholder: "Select a folder",
+    searchPlaceholder: "Search folders...",
+    createFolderFailed: "Failed to create folder: {message}",
   },
   sqlLibrary: {
     title: "SQL Library",

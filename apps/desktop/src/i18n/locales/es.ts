@@ -122,6 +122,10 @@ export default withEnglishFallback({
     renameFile: "Renombrar SQL",
     deleteFile: "Eliminar SQL",
     deleteFileConfirm: "¿Eliminar “{name}”?",
+    createFolderOption: "Crear carpeta “{name}”",
+    folderPlaceholder: "Seleccionar carpeta",
+    searchPlaceholder: "Buscar carpetas...",
+    createFolderFailed: "Error al crear carpeta: {message}",
   },
   sqlLibrary: {
     title: "Biblioteca SQL",

@@ -122,6 +122,10 @@ export default withEnglishFallback({
     renameFile: "重命名 SQL",
     deleteFile: "删除 SQL",
     deleteFileConfirm: "确定删除“{name}”吗？",
+    createFolderOption: "创建文件夹“{name}”",
+    folderPlaceholder: "选择文件夹",
+    searchPlaceholder: "搜索文件夹...",
+    createFolderFailed: "创建文件夹失败：{message}",
   },
   sqlLibrary: {
     title: "SQL 库",

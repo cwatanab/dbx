@@ -122,6 +122,10 @@ export default withEnglishFallback({
     renameFile: "SQLの名前を変更",
     deleteFile: "SQLを削除",
     deleteFileConfirm: "「{name}」を削除しますか？",
+    createFolderOption: "フォルダ「{name}」を作成",
+    folderPlaceholder: "フォルダを選択",
+    searchPlaceholder: "フォルダを検索...",
+    createFolderFailed: "フォルダの作成に失敗しました: {message}",
   },
   sqlLibrary: {
     title: "SQLライブラリ",
