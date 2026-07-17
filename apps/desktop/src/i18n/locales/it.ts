@@ -1800,6 +1800,7 @@ export default withEnglishFallback({
     loadMore: "Carica altro...",
     objectBrowser: "Sfoglia in Esplora Oggetti ({count})",
     extensions: "Estensioni",
+    types: "Tipi",
   },
   userAdmin: {
     title: "Utenti e Privilegi",
@@ -1986,6 +1987,9 @@ export default withEnglishFallback({
     sortAsc: "Crescente",
     sortDesc: "Decrescente",
     sortBy: "Ordina per",
+    trigger: "Trigger",
+    typeDefinition: "Definizione del tipo",
+    typeBody: "Corpo del tipo",
   },
   structureEditor: {
     mysqlDataTypeHelp: {

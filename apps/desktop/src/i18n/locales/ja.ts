@@ -1801,6 +1801,7 @@ export default withEnglishFallback({
     linkedServers: "リンクサーバー",
     materializedViews: "マテリアライズドビュー",
     extensions: "拡張機能",
+    types: "タイプ",
   },
   zookeeper: {
     prefixPlaceholder: "パスプレフィックス（例: /app/）",
@@ -2021,6 +2022,9 @@ export default withEnglishFallback({
     sortAsc: "昇順",
     sortDesc: "降順",
     sortBy: "並べ替え",
+    trigger: "トリガー",
+    typeDefinition: "タイプ",
+    typeBody: "タイプ本体",
   },
   structureEditor: {
     mysqlDataTypeHelp: {
