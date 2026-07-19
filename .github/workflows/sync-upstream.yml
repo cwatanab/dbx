@@ -1,0 +1,56 @@
+name: Sync Upstream & Release
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs daily at 00:00 UTC (09:00 JST)
+  workflow_dispatch: # Allows manual triggering from the GitHub Actions UI
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Upstream Remote
+        run: |
+          git remote add upstream https://github.com/t8y2/dbx.git
+          git fetch upstream --tags
+
+      - name: Sync Main Branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Sync the main branch of the fork with the upstream main branch
+          gh repo sync ${{ github.repository }} --source t8y2/dbx --branch main
+
+      - name: Check and Push Missing Tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Compare tags between upstream and origin, and push any missing 'v*' tags.
+          # Pushing a 'v*' tag will automatically trigger the existing release.yml workflow.
+          
+          # List all tags matching v* (includes newly fetched upstream tags)
+          UPSTREAM_TAGS=$(git tag -l "v*")
+          
+          # List tags already present on origin (fork)
+          ORIGIN_TAGS=$(git ls-remote --tags origin | awk -F'/' '{print $3}' | grep '^v' || true)
+          
+          for TAG in $UPSTREAM_TAGS; do
+            if ! echo "$ORIGIN_TAGS" | grep -q "^${TAG}$"; then
+              echo "New tag detected on upstream: $TAG. Pushing to origin..."
+              git push origin "$TAG"
+            fi
+          done
