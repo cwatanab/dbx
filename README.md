@@ -1,6 +1,7 @@
 > [!IMPORTANT]
 > **Unofficial Build**
 > This is an unofficial build that fixes a Windows SSH-Agent (Pageant) connection issue on standalone/non-domain-joined machines (resolving the `GetUserNameExA` failure by falling back to the `USERNAME` environment variable).
+> This is a temporary workaround until [Eugeny/russh PR #726](https://github.com/Eugeny/russh/pull/726) is merged upstream.
 
 <div align="center">
   <p style="font-size: 18px; white-space: nowrap;"><strong>60+ databases in 20 MB. Desktop & Docker self-hosting, with built-in AI assistant.</strong></p>
