@@ -15,7 +15,7 @@ jobs:
       - name: Checkout Fork
         uses: actions/checkout@v5
         with:
-          ref: upstream-main # Checkout the clean upstream-main branch
+          ref: upstream-main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -29,28 +29,36 @@ jobs:
           git remote add upstream https://github.com/t8y2/dbx.git
           git fetch upstream --tags
 
-      - name: Sync Upstream Main to upstream-main
-        run: |
-          # Reset local upstream-main to upstream/main
-          git reset --hard upstream/main
-          git push origin upstream-main --force
-
-      - name: Check and Push Missing Tags
+      - name: Detect and Sync New Upstream Version Tags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Compare tags between upstream and origin, and push any missing 'v*' tags.
-          # Pushing a 'v*' tag will automatically trigger the existing release.yml workflow.
+          # 1. Get all version tags (v*) from upstream
+          UPSTREAM_TAGS=$(git tag -l "v*" | sort -V)
           
-          # List all tags matching v* (includes newly fetched upstream tags)
-          UPSTREAM_TAGS=$(git tag -l "v*")
-          
-          # List tags already present on origin (fork)
+          # 2. Get all version tags already on origin
           ORIGIN_TAGS=$(git ls-remote --tags origin | awk -F'/' '{print $3}' | grep '^v' || true)
+          
+          NEW_TAGS_FOUND=false
+          LATEST_NEW_TAG=""
           
           for TAG in $UPSTREAM_TAGS; do
             if ! echo "$ORIGIN_TAGS" | grep -q "^${TAG}$"; then
-              echo "New tag detected on upstream: $TAG. Pushing to origin..."
+              echo "New version tag detected on upstream: $TAG"
+              NEW_TAGS_FOUND=true
+              LATEST_NEW_TAG="$TAG"
+              
+              # Push the tag to origin to trigger the release workflow
               git push origin "$TAG"
             fi
           done
+          
+          # 3. If new tags were found, sync upstream-main to the latest tag's commit
+          if [ "$NEW_TAGS_FOUND" = true ]; then
+            echo "Syncing upstream-main branch to the latest version tag: $LATEST_NEW_TAG"
+            git checkout upstream-main
+            git reset --hard "$LATEST_NEW_TAG"
+            git push origin upstream-main --force
+          else
+            echo "No new version tags found on upstream. Skipping branch sync."
+          fi
