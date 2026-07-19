@@ -15,6 +15,7 @@ jobs:
       - name: Checkout Fork
         uses: actions/checkout@v5
         with:
+          ref: upstream-main # Checkout the clean upstream-main branch
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -28,12 +29,11 @@ jobs:
           git remote add upstream https://github.com/t8y2/dbx.git
           git fetch upstream --tags
 
-      - name: Sync Main Branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sync Upstream Main to upstream-main
         run: |
-          # Sync the main branch of the fork with the upstream main branch
-          gh repo sync ${{ github.repository }} --source t8y2/dbx --branch main
+          # Reset local upstream-main to upstream/main
+          git reset --hard upstream/main
+          git push origin upstream-main --force
 
       - name: Check and Push Missing Tags
         env:
