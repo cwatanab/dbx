@@ -17,7 +17,7 @@ jobs:
         with:
           ref: upstream-main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
         run: |
@@ -31,29 +31,43 @@ jobs:
 
       - name: Detect and Sync New Upstream Version Tags
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          # 1. Get all version tags (v*) from upstream
-          UPSTREAM_TAGS=$(git tag -l "v*" | sort -V)
+          # 1. Get all version tags (v*) from upstream, ignoring any unofficial/custom tags
+          UPSTREAM_TAGS=$(git tag -l "v*" | grep -v -- "-unofficial" | sort -V)
           
           # 2. Get all version tags already on origin
           ORIGIN_TAGS=$(git ls-remote --tags origin | awk -F'/' '{print $3}' | grep '^v' || true)
+          
+          # 3. Find the latest version on origin (ignoring -unofficial suffix for comparison)
+          LATEST_ORIGIN_VER=$(echo "$ORIGIN_TAGS" | sed -E 's/^v//; s/-unofficial//' | sort -V | tail -n 1)
+          if [ -z "$LATEST_ORIGIN_VER" ]; then
+            LATEST_ORIGIN_VER="0.0.0"
+          fi
+          
+          echo "Latest version on origin: $LATEST_ORIGIN_VER"
           
           NEW_TAGS_FOUND=false
           LATEST_NEW_TAG=""
           
           for TAG in $UPSTREAM_TAGS; do
-            if ! echo "$ORIGIN_TAGS" | grep -q "^${TAG}$"; then
-              echo "New version tag detected on upstream: $TAG"
-              NEW_TAGS_FOUND=true
-              LATEST_NEW_TAG="$TAG"
-              
-              # Push the tag to origin to trigger the release workflow
-              git push origin "$TAG"
+            TAG_VER=$(echo "$TAG" | sed -E 's/^v//')
+            
+            # Check if this tag is newer than the latest version on origin
+            if [ "$TAG_VER" != "$LATEST_ORIGIN_VER" ] && [ "$(printf '%s\n%s' "$LATEST_ORIGIN_VER" "$TAG_VER" | sort -V | tail -n 1)" = "$TAG_VER" ]; then
+              # Double check that the tag is not already on origin
+              if ! echo "$ORIGIN_TAGS" | grep -q "^${TAG}$"; then
+                echo "New version tag detected on upstream: $TAG"
+                NEW_TAGS_FOUND=true
+                LATEST_NEW_TAG="$TAG"
+                
+                # Push the tag to origin to trigger the release workflow
+                git push origin "$TAG"
+              fi
             fi
           done
           
-          # 3. If new tags were found, sync upstream-main to the latest tag's commit
+          # 4. If new tags were found, sync upstream-main to the latest tag's commit
           if [ "$NEW_TAGS_FOUND" = true ]; then
             echo "Syncing upstream-main branch to the latest version tag: $LATEST_NEW_TAG"
             git checkout upstream-main
