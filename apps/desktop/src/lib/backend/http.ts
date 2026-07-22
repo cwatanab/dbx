@@ -54,6 +54,7 @@ import type {
   UpgradeAllAgentDriversResult,
   AgentUpdateBlocker,
   DesktopSettings,
+  McpGlobalPolicy,
   SavedSqlSyncRequest,
   DriverInstallProgress,
   JavaRuntimeConfig,
@@ -849,6 +850,10 @@ export async function buildDuckDbAttachDatabaseSql(path: string, name: string): 
   return post("/api/query/build-duckdb-attach-database-sql", { options: { path, name } });
 }
 
+export async function buildSqliteAttachDatabaseSql(path: string, name: string): Promise<string> {
+  return post("/api/query/build-sqlite-attach-database-sql", { options: { path, name } });
+}
+
 export async function buildDropObjectSql(options: DropObjectSqlOptions): Promise<string> {
   return post("/api/query/build-drop-object-sql", { options });
 }
@@ -1161,6 +1166,19 @@ export async function loadDesktopSettings(): Promise<DesktopSettings> {
 
 export async function saveDesktopSettings(settings: DesktopSettings): Promise<void> {
   safeLocalStorageSet(DESKTOP_SETTINGS_STORAGE_KEY, JSON.stringify({ ...DEFAULT_DESKTOP_SETTINGS, ...settings }));
+}
+
+export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
+  return get("/api/app-settings/mcp-policy");
+}
+
+export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {
+  const res = await fetch(apiUrl("/api/app-settings/mcp-policy"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(policy),
+  });
+  if (!res.ok) throw new Error(await res.text());
 }
 
 export interface OpenTabsStatePayload {
@@ -2283,7 +2301,11 @@ export async function getSystemProxyUrl(): Promise<string | null> {
   return null;
 }
 
-export async function downloadAndInstallUpdate(_source: UpdateDownloadSource, _latestVersion?: string): Promise<void> {
+export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersion?: string): Promise<void> {
+  throw new Error("In-app update downloads are only available in the desktop app.");
+}
+
+export async function installDownloadedUpdate(): Promise<void> {
   throw new Error("In-app update installation is only available in the desktop app.");
 }
 

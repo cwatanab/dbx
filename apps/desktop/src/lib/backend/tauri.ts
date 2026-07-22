@@ -166,6 +166,13 @@ export interface DesktopSettings {
   sidebar_table_page_size?: number | null;
 }
 
+export interface McpGlobalPolicy {
+  readOnly: boolean;
+  allowDangerousSql: boolean;
+  allowedConnectionIds: string[] | null;
+  configured: boolean;
+}
+
 export interface SavedSqlSyncEntry {
   folderName?: string;
   fileName: string;
@@ -446,6 +453,14 @@ export async function loadDesktopSettings(): Promise<DesktopSettings> {
 
 export async function saveDesktopSettings(settings: DesktopSettings): Promise<void> {
   return invoke("save_desktop_settings", { settings });
+}
+
+export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
+  return invoke("load_mcp_global_policy");
+}
+
+export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {
+  return invoke("save_mcp_global_policy", { policy });
 }
 
 export interface OpenTabsStatePayload {
@@ -938,6 +953,10 @@ export async function buildCreateDatabaseSql(options: CreateDatabaseSqlOptions):
 
 export async function buildDuckDbAttachDatabaseSql(path: string, name: string): Promise<string> {
   return invoke("build_duckdb_attach_database_sql", { options: { path, name } });
+}
+
+export async function buildSqliteAttachDatabaseSql(path: string, name: string): Promise<string> {
+  return invoke("build_sqlite_attach_database_sql", { options: { path, name } });
 }
 
 export async function buildDropObjectSql(options: DropObjectSqlOptions): Promise<string> {
@@ -1454,8 +1473,12 @@ export async function getSystemProxyUrl(): Promise<string | null> {
   return invoke("get_system_proxy_url");
 }
 
-export async function downloadAndInstallUpdate(source: UpdateDownloadSource, latestVersion?: string): Promise<void> {
-  return invoke("download_and_install_update", { source, latestVersion });
+export async function downloadUpdate(source: UpdateDownloadSource, latestVersion?: string): Promise<void> {
+  return invoke("download_update", { source, latestVersion });
+}
+
+export async function installDownloadedUpdate(): Promise<void> {
+  return invoke("install_downloaded_update");
 }
 
 export async function getAppVersion(): Promise<string> {
