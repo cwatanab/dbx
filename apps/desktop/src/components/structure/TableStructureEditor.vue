@@ -2090,7 +2090,8 @@ function canDropIndex(index: EditableStructureIndex): boolean {
 }
 
 const canEditForeignKeys = computed(() => structureCapabilities.value.foreignKey);
-const canEditMysqlTriggers = computed(() => structureDialect.value === "mysql");
+const canEditTriggers = computed(() => structureDialect.value === "mysql" || structureDialect.value === "oracle");
+const isOracleTriggerEditor = computed(() => structureDialect.value === "oracle");
 
 function generatedForeignKeyName(column = ""): string {
   const table = structureIndexTableName() || "table";
@@ -2138,14 +2139,14 @@ function canEditForeignKeyDraft(foreignKey: EditableStructureForeignKey): boolea
 }
 
 function addTrigger() {
-  if (!canEditMysqlTriggers.value || triggersLoading.value) return;
+  if (!canEditTriggers.value || triggersLoading.value) return;
   activeTab.value = "triggers";
   triggers.value.push({
     id: `new:${uuid()}`,
     name: "",
-    timing: "BEFORE",
+    timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : "BEFORE",
     event: "INSERT",
-    statement: "BEGIN\n  \nEND",
+    statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : "BEGIN\n  \nEND",
     markedForDrop: false,
   });
 }
@@ -2160,7 +2161,7 @@ function toggleDropTrigger(trigger: EditableStructureTrigger) {
 }
 
 function canEditTriggerDraft(trigger: EditableStructureTrigger): boolean {
-  return !triggersLoading.value && canEditMysqlTriggers.value && !trigger.markedForDrop;
+  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop;
 }
 
 function primarySqlOperation(sql: string): string {
@@ -2293,7 +2294,7 @@ function addItemForActiveTab(): boolean {
     addForeignKey();
     return true;
   }
-  if (activeTab.value === "triggers" && canEditMysqlTriggers.value) {
+  if (activeTab.value === "triggers" && canEditTriggers.value) {
     addTrigger();
     return true;
   }
@@ -2648,7 +2649,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addForeignKey") }}
               </Button>
-              <Button v-if="activeTab === 'triggers'" size="sm" :class="structureToolbarButtonClass" :disabled="!canEditMysqlTriggers || triggersLoading" @click="addTrigger">
+              <Button v-if="activeTab === 'triggers'" size="sm" :class="structureToolbarButtonClass" :disabled="!canEditTriggers || triggersLoading" @click="addTrigger">
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addTrigger") }}
               </Button>
@@ -3193,9 +3194,10 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             </div>
             <div v-else class="space-y-1.5">
               <div v-for="trigger in triggers" :key="trigger.id" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="trigger.markedForDrop ? 'bg-destructive/5 opacity-60' : ''">
-                <div class="grid grid-cols-[minmax(140px,1fr)_110px_110px_auto] gap-1.5">
+                <div class="grid grid-cols-[minmax(140px,1fr)_minmax(130px,180px)_minmax(140px,1fr)_auto] gap-1.5">
                   <Input v-model="trigger.name" :class="structureControlClass" :placeholder="t('structureEditor.triggerName')" :disabled="!canEditTriggerDraft(trigger)" />
-                  <Select v-model="trigger.timing" :disabled="!canEditTriggerDraft(trigger)">
+                  <Input v-if="isOracleTriggerEditor" v-model="trigger.timing" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
+                  <Select v-else v-model="trigger.timing" :disabled="!canEditTriggerDraft(trigger)">
                     <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                       <SelectValue />
                     </SelectTrigger>
@@ -3203,7 +3205,8 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       <SelectItem v-for="timing in triggerTimingOptions" :key="timing" :value="timing">{{ timing }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Select v-model="trigger.event" :disabled="!canEditTriggerDraft(trigger)">
+                  <Input v-if="isOracleTriggerEditor" v-model="trigger.event" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
+                  <Select v-else v-model="trigger.event" :disabled="!canEditTriggerDraft(trigger)">
                     <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                       <SelectValue />
                     </SelectTrigger>

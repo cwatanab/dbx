@@ -29,6 +29,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
@@ -494,6 +495,7 @@ const selectedJdbcDriverPath = ref("");
 const jdbcManualClasspathOpen = ref(false);
 const connectionUrlInput = ref("");
 const appliedConnectionUrlInput = ref("");
+const oracleTnsAdminPath = ref("");
 const oceanbaseSubMode = ref<"mysql" | "oracle">("mysql");
 const h2ConnectionMode = ref<H2ConnectionMode>("file");
 const dremioConnectionMode = ref<DremioConnectionMode>("legacy");
@@ -1764,6 +1766,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   }
 
   if (!preserveConnectionFields) {
+    oracleTnsAdminPath.value = "";
     form.value.port = profile.port;
     setSqlServerPortExplicit(form.value, false);
     form.value.username = profile.user;
@@ -1910,6 +1913,7 @@ watch(
         visible_databases: config.visible_databases,
         visible_schemas: config.visible_schemas,
       };
+      oracleTnsAdminPath.value = parseOracleTnsConnectionString(config.connection_string)?.tnsAdmin || "";
       productionProtectionEnabled.value = !!config.is_production || (config.production_databases?.length ?? 0) > 0;
       connectionUrlInput.value = config.db_type === "h2" && config.connection_string ? config.connection_string : "";
       appliedConnectionUrlInput.value = connectionUrlInput.value.trim();
@@ -1988,12 +1992,14 @@ watch(
 );
 
 const databaseLabel = computed(() => {
+  if (form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns") return t("connection.oracleTnsAlias");
   if (form.value.db_type === "oracle") return t("connection.serviceName");
   if (form.value.db_type === "influxdb" && influxDbVersion.value === "2") return "Bucket";
   return t("connection.database");
 });
 
 const databasePlaceholder = computed(() => {
+  if (form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns") return t("connection.oracleTnsAliasPlaceholder");
   if (form.value.db_type === "kingbase") return t("connection.databasePlaceholderRequired");
   const fallback = defaultDatabaseForProfile();
   if (!fallback) return t("connection.databasePlaceholder");
@@ -2485,7 +2491,7 @@ const zookeeperConnectString = computed({
     form.value.connection_string = normalizeZooKeeperConnectString(value);
   },
 });
-const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isCloudflareD1Connection(form.value) && !isH2FileMode.value);
+const canUseTransportLayers = computed(() => form.value.db_type !== "sqlite" && form.value.db_type !== "access" && !isCloudflareD1Connection(form.value) && !isH2FileMode.value && !(form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns"));
 const shouldShowAgentDriverInstallHint = computed(() => showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile));
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
 const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", driver: agentDriverInstallKey(form.value.db_type, form.value.driver_profile) }));
@@ -2812,6 +2818,7 @@ function applyConnectionUrlToForm(input: string): boolean {
 
     const parsed = parseConnectionUrl(input, selectedType.value);
     form.value = applyParsedConnectionUrl(form.value, parsed);
+    oracleTnsAdminPath.value = parseOracleTnsConnectionString(parsed.connectionString)?.tnsAdmin || "";
     selectedType.value = parsed.driverProfile;
     customDriverName.value = isCustomCompatibleProfile() ? parsed.driverLabel : "";
     mongoUseUrl.value = !!parsed.useMongoUrl;
@@ -2964,7 +2971,22 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     normalized.connect_timeout_secs = Number.isFinite(timeout) && timeout > 0 ? timeout : 5;
     return { type: "ssh", ...normalized };
   });
+  if (config.db_type === "oracle" && config.oracle_connection_type === "tns" && config.transport_layers.some((layer) => layer.enabled !== false)) {
+    throw new Error(t("connection.oracleTnsTransportUnsupported"));
+  }
   validateTransportLayers(config);
+  if (config.db_type === "oracle" && config.oracle_connection_type === "tns") {
+    const alias = config.database?.trim() || "";
+    const tnsAdmin = normalizeOracleTnsAdminPath(oracleTnsAdminPath.value);
+    if (!alias) throw new Error(t("connection.oracleTnsAliasRequired"));
+    if (!tnsAdmin) throw new Error(t("connection.oracleTnsAdminRequired"));
+    config.database = alias;
+    config.connection_string = buildOracleTnsConnectionString(alias, tnsAdmin);
+  } else if (config.db_type === "oracle" && parseOracleTnsConnectionString(config.connection_string)) {
+    // Only clear DBX-generated TNS URLs when switching modes; preserve custom
+    // service, SID, and descriptor JDBC strings exactly as before.
+    config.connection_string = undefined;
+  }
   const connectTimeout = Number(config.connect_timeout_secs);
   config.connect_timeout_secs = Number.isFinite(connectTimeout) && connectTimeout > 0 ? connectTimeout : 10;
   const queryTimeout = Number(config.query_timeout_secs);
@@ -3774,6 +3796,7 @@ function resetForm() {
   selectedJdbcDriverPath.value = "";
   connectionUrlInput.value = "";
   appliedConnectionUrlInput.value = "";
+  oracleTnsAdminPath.value = "";
   dialogStep.value = "select";
   dbSearchQuery.value = "";
   selectedDbCategory.value = "sql";
@@ -3822,6 +3845,7 @@ function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draf
 function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   applyProfile(draft.driverProfile);
   form.value = applyConnectionDraftToConfig(form.value, draft);
+  oracleTnsAdminPath.value = parseOracleTnsConnectionString(form.value.connection_string)?.tnsAdmin || "";
   selectedType.value = draft.driverProfile;
   if (form.value.db_type === "h2") {
     h2ConnectionMode.value = h2ConnectionModeForConfig(form.value);
@@ -4237,6 +4261,20 @@ async function browseHiveKerberosFile(target: "krb5" | "jaas") {
         hiveJaasConfigPath.value = selected;
       }
     }
+  }
+}
+
+async function browseOracleTnsNamesFile() {
+  if (!isTauriRuntime()) return;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    title: t("connection.oracleTnsAdminBrowse"),
+    multiple: false,
+    filters: [{ name: "Oracle TNS names", extensions: ["ora"] }],
+  });
+  if (typeof selected === "string") {
+    oracleTnsAdminPath.value = normalizeOracleTnsAdminPath(selected);
+    resetTestState();
   }
 }
 
@@ -5664,7 +5702,7 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'oracle' || form.oracle_connection_type !== 'tns'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ form.db_type === "elasticsearch" && elasticsearchConnectionMode === "kibana" ? t("connection.elasticsearchKibanaHost") : t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
                     <Input v-model.number="form.port" type="number" class="col-span-1" @input="markSqlServerPortExplicit" />
@@ -5698,6 +5736,26 @@ function openExternalUrl(url: string) {
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                     <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
+                  </div>
+
+                  <div v-if="form.db_type === 'oracle' && form.oracle_connection_type === 'tns'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">TNS_ADMIN</Label>
+                    <div class="col-span-3 flex items-center gap-1">
+                      <Input v-model="oracleTnsAdminPath" class="flex-1" :placeholder="t('connection.oracleTnsAdminPlaceholder')" />
+                      <Tooltip v-if="isDesktop">
+                        <TooltipTrigger as-child>
+                          <Button variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseOracleTnsNamesFile">
+                            <FolderOpen class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t("connection.oracleTnsAdminBrowse") }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </div>
+
+                  <div v-if="form.db_type === 'oracle' && form.oracle_connection_type === 'tns'" class="grid grid-cols-4 items-start gap-4">
+                    <span />
+                    <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleTnsPathHint") }}</p>
                   </div>
 
                   <template v-if="form.db_type === 'hive'">
@@ -5772,12 +5830,12 @@ function openExternalUrl(url: string) {
 
                   <div v-if="form.db_type === 'oracle'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.mode") }}</Label>
-                    <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
+                    <div class="col-span-3 grid h-8 grid-cols-3 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
                       <button
                         type="button"
                         class="h-7 rounded-sm px-3 text-sm transition-colors"
-                        :class="form.oracle_connection_type !== 'sid' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
-                        :aria-pressed="form.oracle_connection_type !== 'sid'"
+                        :class="form.oracle_connection_type === 'service_name' || !form.oracle_connection_type ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                        :aria-pressed="form.oracle_connection_type === 'service_name' || !form.oracle_connection_type"
                         @click="form.oracle_connection_type = 'service_name'"
                       >
                         {{ t("connection.serviceNameOnly") }}
@@ -5790,6 +5848,15 @@ function openExternalUrl(url: string) {
                         @click="form.oracle_connection_type = 'sid'"
                       >
                         SID
+                      </button>
+                      <button
+                        type="button"
+                        class="h-7 rounded-sm px-3 text-sm transition-colors"
+                        :class="form.oracle_connection_type === 'tns' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                        :aria-pressed="form.oracle_connection_type === 'tns'"
+                        @click="form.oracle_connection_type = 'tns'"
+                      >
+                        TNS
                       </button>
                     </div>
                   </div>

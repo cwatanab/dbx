@@ -1796,6 +1796,11 @@ impl AppState {
         if transport_layers.is_empty() {
             return Ok((config.host.clone(), config.port));
         }
+        if config.uses_oracle_tns() {
+            // A TNS descriptor may contain several failover addresses, so rewriting it
+            // through one local tunnel endpoint would silently break Oracle Net routing.
+            return Err("Oracle TNS connections cannot be combined with SSH, proxy, or HTTP tunnel layers. Remove the transport layer or use Service Name/SID mode.".to_string());
+        }
 
         let (remote_host, remote_port) = connection_remote_endpoint(config);
         let local_port = db::transport_layer_tunnel::start_transport_layers(
@@ -5545,6 +5550,20 @@ for line in sys.stdin:
             connect_timeout_secs: 10,
             profile_id: profile_id.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn oracle_tns_connection_rejects_transport_layers() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("DBX_FAILOVER"));
+        config.db_type = DatabaseType::Oracle;
+        config.oracle_connection_type = Some("tns".to_string());
+        config.transport_layers = vec![TransportLayerConfig::Ssh(ssh_layer("tns-tunnel", ""))];
+
+        let error = state.connection_host_port("oracle-tns", &config).await.unwrap_err();
+        assert!(error.contains("cannot be combined with SSH, proxy, or HTTP tunnel"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

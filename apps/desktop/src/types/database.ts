@@ -140,7 +140,7 @@ export interface ConnectionConfig {
   client_cert_path?: string;
   client_key_path?: string;
   sysdba?: boolean;
-  oracle_connection_type?: "service_name" | "sid";
+  oracle_connection_type?: "service_name" | "sid" | "tns";
   connection_string?: string;
   jdbc_driver_class?: string;
   jdbc_driver_paths?: string[];
