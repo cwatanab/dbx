@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { afterEach, test } from "vitest";
 import { createPinia, disposePinia, getActivePinia, setActivePinia } from "pinia";
-import { isReactive } from "vue";
+import { isReactive, toRaw } from "vue";
 import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
 import { analyzeEditableQueryEditability } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 import { resultSqlForGrid } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
@@ -2584,6 +2584,117 @@ test("data tab execution preserves pagination offset metadata", async () => {
   }
 });
 
+test("append pagination preserves existing rows and respects the memory cap", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(conn("conn-append"));
+  const tabId = store.createTab("conn-append", "db", "users", "data", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  const firstRow = [1] as (string | number | boolean | null)[];
+  tab.result = { columns: ["id"], rows: [firstRow], affected_rows: 0, execution_time_ms: 3 };
+
+  globalThis.fetch = withConnectionHealthMock(async (input) => {
+    if (String(input) === "/api/query/execute-multi") {
+      return Response.json([{ columns: ["id"], rows: [[2], [3]], affected_rows: 0, execution_time_ms: 4, has_more: true }]);
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 2 OFFSET 1;', {
+      pagination: { limit: 2, offset: 1 },
+      appendResult: { maxRows: 2 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+    });
+
+    assert.deepEqual(tab.result?.rows, [[1], [2]]);
+    assert.equal(toRaw(tab.result?.rows[0]), firstRow);
+    assert.equal(tab.result?.execution_time_ms, 7);
+    assert.equal(tab.result?.has_more, false);
+    assert.equal(tab.resultPageOffset, 0, "later refreshes must restart from the logical result origin");
+    assert.equal(tab.resultPageLimit, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("failed append pagination preserves the visible result", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(conn("conn-append-error"));
+  const tabId = store.createTab("conn-append-error", "db", "users", "data", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  const originalResult: QueryResult = { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 3 };
+  tab.result = originalResult;
+
+  globalThis.fetch = withConnectionHealthMock(async (input) => {
+    if (String(input) === "/api/query/execute-multi") return new Response("segment failed", { status: 500 });
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 2 OFFSET 1;', {
+      pagination: { limit: 2, offset: 1 },
+      appendResult: { maxRows: 10 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+    });
+
+    assert.equal(toRaw(tab.result), originalResult);
+    assert.deepEqual(tab.result?.rows, [[1]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("stale append offsets do not duplicate already loaded rows", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(conn("conn-append-stale"));
+  const tabId = store.createTab("conn-append-stale", "db", "users", "data", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  const originalResult: QueryResult = { columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 3 };
+  tab.result = originalResult;
+
+  globalThis.fetch = withConnectionHealthMock(async (input) => {
+    if (String(input) === "/api/query/execute-multi") return Response.json([{ columns: ["id"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, 'SELECT * FROM "users" LIMIT 1 OFFSET 1;', {
+      pagination: { limit: 1, offset: 1 },
+      appendResult: { maxRows: 10 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+    });
+
+    assert.equal(toRaw(tab.result), originalResult);
+    assert.deepEqual(tab.result?.rows, [[1], [2]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("data tab default pagination uses the dedicated table-open page size", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
@@ -3992,6 +4103,48 @@ test("buildQueryResultExportRequest uses exportRowLimit when enabled", async () 
     assert.equal(request?.pageSize, 2500);
     assert.equal(request?.rowLimit, 200000);
     assert.equal(request?.includeSqlSheet, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("buildQueryResultExportRequest includes PostgreSQL batch setup for a truncated temporary-table result", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  const tabId = store.createTab("conn-1", "analytics", "Query", "query", "public");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  const batchSql = ["CREATE TEMPORARY TABLE t1 AS SELECT id FROM events", "CREATE INDEX t1_id ON t1(id)", "SELECT * FROM t1", "DROP TABLE t1"].join(";\n");
+  tab.lastExecutedSql = batchSql;
+  tab.resultBaseSql = batchSql;
+  tab.result = {
+    columns: ["id"],
+    rows: [[1]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    statement_index: 2,
+    sourceStatement: "SELECT * FROM t1",
+    truncated: true,
+    has_more: false,
+  };
+
+  globalThis.fetch = withConnectionHealthMock(async () => new Response("unexpected request", { status: 500 }));
+
+  try {
+    const request = await store.buildQueryResultExportRequest(tabId, {
+      exportId: "export-temp",
+      filePath: "C:\\tmp\\temp.csv",
+      format: "csv",
+    });
+
+    assert.equal(request?.sql, "SELECT * FROM t1");
+    assert.deepEqual(request?.setupSql, ["CREATE TEMPORARY TABLE t1 AS SELECT id FROM events", "CREATE INDEX t1_id ON t1(id)"]);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

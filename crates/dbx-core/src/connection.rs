@@ -333,15 +333,21 @@ pub fn sqlserver_legacy_agent_config(config: &ConnectionConfig) -> ConnectionCon
     legacy_config
 }
 
-pub fn sqlserver_legacy_agent_error(native_error: &str, agent_error: &str) -> String {
-    let install_hint = if agent_error.contains("driver is not installed") {
-        format!("\n\n{SQLSERVER_LEGACY_DRIVER_INSTALL_HINT}")
+pub fn sqlserver_uses_legacy_driver(config: &ConnectionConfig) -> bool {
+    config
+        .driver_profile
+        .as_deref()
+        .is_some_and(|profile| profile.eq_ignore_ascii_case(db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE))
+}
+
+pub fn sqlserver_legacy_driver_error(agent_error: &str) -> String {
+    // AgentManager currently returns launch failures as strings. This exact marker is generated
+    // internally and only adds guidance for an explicitly selected compatibility driver.
+    if agent_error.contains("driver is not installed") {
+        format!("{agent_error}\n\n{SQLSERVER_LEGACY_DRIVER_INSTALL_HINT}")
     } else {
-        String::new()
-    };
-    format!(
-        "{native_error}\n\nFallback with SQL Server legacy compatibility component failed: {agent_error}{install_hint}"
-    )
+        agent_error.to_string()
+    }
 }
 
 pub async fn connect_mysql_metadata_pool(
@@ -748,26 +754,48 @@ impl AppState {
         Ok(PoolKind::ExternalDriver { driver_id: driver_id.to_string(), config: Arc::new(config.clone()), session })
     }
 
-    pub async fn test_sqlserver_connection_with_legacy_fallback(
+    pub async fn test_sqlserver_connection(
         &self,
         config: &ConnectionConfig,
         host: &str,
         port: u16,
         connect_timeout: Duration,
     ) -> Result<String, String> {
-        self.test_sqlserver_connection_with_legacy_fallback_with_info(config, host, port, connect_timeout)
-            .await
-            .map(|result| result.message)
+        self.test_sqlserver_connection_with_info(config, host, port, connect_timeout).await.map(|result| result.message)
     }
 
-    pub async fn test_sqlserver_connection_with_legacy_fallback_with_info(
+    pub async fn test_sqlserver_connection_with_info(
         &self,
         config: &ConnectionConfig,
         host: &str,
         port: u16,
         connect_timeout: Duration,
     ) -> Result<ConnectionTestResult, String> {
-        match db::sqlserver::connect_with_port_explicit(
+        if sqlserver_uses_legacy_driver(config) {
+            let legacy_config = sqlserver_legacy_agent_config(config);
+            let connect_params =
+                agent_connect_params(&legacy_config, host, port, legacy_config.effective_database().unwrap_or(""));
+            let mut client = self
+                .agent_manager
+                .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
+                .await
+                .map_err(|err| sqlserver_legacy_driver_error(&err))?;
+            let response = client
+                .call_method_with_timeout::<serde_json::Value>(
+                    AgentMethod::TestConnection,
+                    connect_params,
+                    Some(agent_connect_timeout(&legacy_config)),
+                )
+                .await
+                .map_err(|err| sqlserver_legacy_driver_error(&err))?;
+            client.disconnect().await.ok();
+            return Ok(ConnectionTestResult::success(
+                "Connection successful (via SQL Server legacy compatibility driver)",
+            )
+            .with_database_info(database_info_from_protocol_value(&response)));
+        }
+
+        db::sqlserver::connect_with_port_explicit(
             host,
             port,
             config.sqlserver_port_explicit(),
@@ -776,44 +804,38 @@ impl AppState {
             config.database.as_deref(),
             connect_timeout,
         )
-        .await
-        {
-            Ok(_) => Ok(ConnectionTestResult::success("Connection successful")),
-            Err(native_error)
-                if db::sqlserver::sqlserver_legacy_compatibility_enabled(config.url_params.as_deref()) =>
-            {
-                let legacy_config = sqlserver_legacy_agent_config(config);
-                let connect_params =
-                    agent_connect_params(&legacy_config, host, port, legacy_config.effective_database().unwrap_or(""));
-                let mut client = self
-                    .agent_manager
-                    .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
-                    .await
-                    .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                let response = client
-                    .call_method_with_timeout::<serde_json::Value>(
-                        AgentMethod::TestConnection,
-                        connect_params,
-                        Some(agent_connect_timeout(&legacy_config)),
-                    )
-                    .await
-                    .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                client.disconnect().await.ok();
-                Ok(ConnectionTestResult::success("Connection successful (via SQL Server legacy compatibility driver)")
-                    .with_database_info(database_info_from_protocol_value(&response)))
-            }
-            Err(err) => Err(err),
-        }
+        .await?;
+        Ok(ConnectionTestResult::success("Connection successful"))
     }
 
-    pub async fn connect_sqlserver_pool_with_legacy_fallback(
+    pub async fn connect_sqlserver_pool(
         &self,
         config: &ConnectionConfig,
         host: &str,
         port: u16,
         connect_timeout: Duration,
     ) -> Result<PoolKind, String> {
-        match db::sqlserver::connect_with_port_explicit(
+        if sqlserver_uses_legacy_driver(config) {
+            let legacy_config = sqlserver_legacy_agent_config(config);
+            let connect_params =
+                agent_connect_params(&legacy_config, host, port, legacy_config.effective_database().unwrap_or(""));
+            let mut client = self
+                .agent_manager
+                .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
+                .await
+                .map_err(|err| sqlserver_legacy_driver_error(&err))?;
+            client
+                .call_method_with_timeout::<serde_json::Value>(
+                    AgentMethod::Connect,
+                    connect_params,
+                    Some(agent_connect_timeout(&legacy_config)),
+                )
+                .await
+                .map_err(|err| sqlserver_legacy_driver_error(&err))?;
+            return Ok(PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client))));
+        }
+
+        let client = db::sqlserver::connect_with_port_explicit(
             host,
             port,
             config.sqlserver_port_explicit(),
@@ -822,32 +844,8 @@ impl AppState {
             config.database.as_deref(),
             connect_timeout,
         )
-        .await
-        {
-            Ok(client) => Ok(PoolKind::SqlServer(Arc::new(tokio::sync::Mutex::new(client)))),
-            Err(native_error)
-                if db::sqlserver::sqlserver_legacy_compatibility_enabled(config.url_params.as_deref()) =>
-            {
-                let legacy_config = sqlserver_legacy_agent_config(config);
-                let connect_params =
-                    agent_connect_params(&legacy_config, host, port, legacy_config.effective_database().unwrap_or(""));
-                let mut client = self
-                    .agent_manager
-                    .spawn(&legacy_config.db_type, legacy_config.driver_profile.as_deref())
-                    .await
-                    .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                client
-                    .call_method_with_timeout::<serde_json::Value>(
-                        AgentMethod::Connect,
-                        connect_params,
-                        Some(agent_connect_timeout(&legacy_config)),
-                    )
-                    .await
-                    .map_err(|err| sqlserver_legacy_agent_error(&native_error, &err))?;
-                Ok(PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client))))
-            }
-            Err(err) => Err(err),
-        }
+        .await?;
+        Ok(PoolKind::SqlServer(Arc::new(tokio::sync::Mutex::new(client))))
     }
 
     pub fn external_driver_runtime_env(&self, driver_id: &str) -> Result<PluginRuntimeEnv, String> {
@@ -1375,14 +1373,13 @@ impl AppState {
                     username,
                     password,
                     Some(&db_config.ca_cert_path),
+                    db_config.url_params.as_deref(),
                     connect_timeout,
                 )?;
                 db::clickhouse_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::ClickHouse(client)
             }
-            DatabaseType::SqlServer => {
-                self.connect_sqlserver_pool_with_legacy_fallback(&db_config, &host, port, connect_timeout).await?
-            }
+            DatabaseType::SqlServer => self.connect_sqlserver_pool(&db_config, &host, port, connect_timeout).await?,
             DatabaseType::Elasticsearch => {
                 let mut client = db::elasticsearch_driver::EsClient::from_config(
                     &url,
@@ -1721,49 +1718,73 @@ impl AppState {
     }
 
     /// Tests a shared tunnel profile in isolation (no downstream database), for
-    /// the Test button in Settings > Tunnels. Only SSH profiles are checked:
-    /// starting an SSH tunnel connects and authenticates eagerly, so a
-    /// successful start verifies host reachability and credentials. Proxy and
-    /// HTTP-tunnel layers connect lazily (nothing happens until traffic flows),
-    /// so there is nothing to verify here without a target to probe.
+    /// the Test button in Settings > Tunnels.
+    ///
+    /// - SSH: starting an SSH tunnel connects and authenticates eagerly, so a
+    ///   successful start verifies host reachability and credentials.
+    /// - Proxy (HTTP CONNECT / SOCKS5): performs a standalone handshake test
+    ///   against the proxy endpoint to verify reachability and credentials.
+    /// - HTTP tunnel: connects lazily (nothing happens until traffic flows), so
+    ///   there is nothing to verify here without a target to probe.
     pub async fn test_tunnel_profile(&self, profile: &TransportLayerConfig) -> Result<String, String> {
-        let TransportLayerConfig::Ssh(ssh) = profile else {
-            return Err("Tunnel test is currently only supported for SSH profiles.".to_string());
-        };
-        let ssh = crate::ssh_config::resolve_ssh_tunnel_config(ssh);
-        if ssh.host.trim().is_empty() {
-            return Err("SSH host is required.".to_string());
+        match profile {
+            TransportLayerConfig::Ssh(ssh) => {
+                let ssh = crate::ssh_config::resolve_ssh_tunnel_config(ssh);
+                if ssh.host.trim().is_empty() {
+                    return Err("SSH host is required.".to_string());
+                }
+                let timeout = if ssh.connect_timeout_secs == 0 {
+                    crate::models::connection::default_ssh_connect_timeout_secs()
+                } else {
+                    ssh.connect_timeout_secs
+                };
+                // A throwaway id so the probe never reuses or evicts a live tunnel, and
+                // a sentinel forward target: SSH auth completes on connect, before any
+                // channel to this target is opened, so it need not be reachable.
+                let probe_id = format!("__tunnel_profile_test__:{}", uuid::Uuid::new_v4());
+                let result = self
+                    .tunnels
+                    .start_tunnel(
+                        &probe_id,
+                        &ssh.host,
+                        ssh.port,
+                        &ssh.user,
+                        &ssh.password,
+                        &ssh.key_path,
+                        &ssh.key_passphrase,
+                        ssh.use_ssh_agent,
+                        &ssh.ssh_agent_sock_path,
+                        &ssh.auth_method,
+                        timeout,
+                        "127.0.0.1",
+                        1,
+                        false,
+                    )
+                    .await;
+                self.tunnels.stop_tunnel(&probe_id).await;
+                result.map(|_| "SSH tunnel connection successful".to_string())
+            }
+            TransportLayerConfig::Proxy(proxy) => {
+                if proxy.host.trim().is_empty() {
+                    return Err("Proxy host is required.".to_string());
+                }
+                if proxy.port == 0 {
+                    return Err("Proxy port is required.".to_string());
+                }
+                crate::db::proxy_tunnel::test_proxy_endpoint(
+                    proxy.proxy_type,
+                    &proxy.host,
+                    proxy.port,
+                    &proxy.username,
+                    &proxy.password,
+                    proxy.test_target.as_deref(),
+                )
+                .await
+            }
+            TransportLayerConfig::HttpTunnel(_) => {
+                Err("Tunnel test is not supported for HTTP tunnel profiles.".to_string())
+            }
         }
-        let timeout = if ssh.connect_timeout_secs == 0 {
-            crate::models::connection::default_ssh_connect_timeout_secs()
-        } else {
-            ssh.connect_timeout_secs
-        };
-        // A throwaway id so the probe never reuses or evicts a live tunnel, and
-        // a sentinel forward target: SSH auth completes on connect, before any
-        // channel to this target is opened, so it need not be reachable.
-        let probe_id = format!("__tunnel_profile_test__:{}", uuid::Uuid::new_v4());
-        let result = self
-            .tunnels
-            .start_tunnel(
-                &probe_id,
-                &ssh.host,
-                ssh.port,
-                &ssh.user,
-                &ssh.password,
-                &ssh.key_path,
-                &ssh.key_passphrase,
-                ssh.use_ssh_agent,
-                &ssh.ssh_agent_sock_path,
-                &ssh.auth_method,
-                timeout,
-                "127.0.0.1",
-                1,
-                false,
-            )
-            .await;
-        self.tunnels.stop_tunnel(&probe_id).await;
-        result.map(|_| "SSH tunnel connection successful".to_string())
     }
 
     pub async fn connection_host_port(
@@ -2283,9 +2304,38 @@ impl AppState {
         database: Option<&str>,
         client_session_id: &str,
     ) -> Result<bool, String> {
+        let Some((pool_key, pool)) = self.take_client_session_pool(connection_id, database, client_session_id).await?
+        else {
+            return Ok(false);
+        };
+        close_pool_kind_with_timeout(pool_key, pool).await;
+        Ok(true)
+    }
+
+    /// Removes a session-scoped pool immediately and schedules the potentially slow driver
+    /// shutdown on the supervised background task set.
+    pub async fn detach_client_session_pool(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: &str,
+    ) -> Result<bool, String> {
+        let Some(removed) = self.take_client_session_pool(connection_id, database, client_session_id).await? else {
+            return Ok(false);
+        };
+        close_removed_pools_in_background(&self.task_supervisor, vec![removed]);
+        Ok(true)
+    }
+
+    async fn take_client_session_pool(
+        &self,
+        connection_id: &str,
+        database: Option<&str>,
+        client_session_id: &str,
+    ) -> Result<Option<(String, PoolKind)>, String> {
         let session = normalize_client_session_id(Some(client_session_id));
         let Some(session) = session else {
-            return Ok(false);
+            return Ok(None);
         };
         let config = {
             let configs = self.configs.read().await;
@@ -2295,18 +2345,13 @@ impl AppState {
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
         let pool_key = session_scoped_pool_key_for(config.as_ref(), base_pool_key.clone(), Some(&session));
         if pool_key == base_pool_key {
-            return Ok(false);
+            return Ok(None);
         }
         self.stop_keepalive_task(&pool_key).await;
         self.pool_activity.write().await.remove(&pool_key);
         self.postgres_cancel_contexts.write().await.remove(&pool_key);
         let removed = self.connections.write().await.remove(&pool_key);
-        if let Some(pool) = removed {
-            close_pool_kind_with_timeout(pool_key, pool).await;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        Ok(removed.map(|pool| (pool_key, pool)))
     }
 
     pub async fn remove_pool_by_key(&self, pool_key: &str) -> bool {
@@ -2428,7 +2473,7 @@ impl AppState {
         self.postgres_cancel_contexts.write().await.remove(pool_key);
         let removed = self.connections.write().await.remove(pool_key);
         if let Some(pool) = removed {
-            close_removed_pools_in_background(vec![(pool_key.to_string(), pool)]);
+            close_removed_pools_in_background(&self.task_supervisor, vec![(pool_key.to_string(), pool)]);
             true
         } else {
             false
@@ -2983,13 +3028,13 @@ impl AppState {
 
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
         let removed = self.drain_connection_pools(connection_id).await;
-        close_removed_pools_in_background(removed);
+        close_removed_pools_in_background(&self.task_supervisor, removed);
     }
 
     #[cfg(feature = "duckdb-bundled")]
     async fn remove_duckdb_pools_detached(&self) {
         let removed = self.drain_duckdb_pools().await;
-        close_removed_pools_in_background(removed);
+        close_removed_pools_in_background(&self.task_supervisor, removed);
     }
 
     #[cfg(not(feature = "duckdb-bundled"))]
@@ -3438,13 +3483,19 @@ async fn close_removed_pools(removed: Vec<(String, PoolKind)>) {
     }
 }
 
-fn close_removed_pools_in_background(removed: Vec<(String, PoolKind)>) {
+fn close_removed_pools_in_background(supervisor: &TaskSupervisor, removed: Vec<(String, PoolKind)>) {
     if removed.is_empty() {
         return;
     }
-    tokio::spawn(async move {
+    // Supervision keeps detached cleanup visible to application shutdown instead of leaving an
+    // untracked Tokio task that may be abandoned silently.
+    let pool_count = removed.len();
+    let task_key = format!("pool-close:{}", uuid::Uuid::new_v4());
+    if !supervisor.spawn_once(task_key, move |_| async move {
         close_removed_pools(removed).await;
-    });
+    }) {
+        log::debug!("Dropped {pool_count} detached pool handle(s) during application shutdown");
+    }
 }
 
 async fn close_pool_kind_with_timeout(pool_key: String, pool: PoolKind) {
@@ -3698,8 +3749,8 @@ mod tests {
         metadata_connection_config, mysql_metadata_fallback_url, oceanbase_mysql_query_timeout_sql,
         oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
         redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
-        sqlserver_legacy_agent_error, task_client_session_id, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
+        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_h2_database_path, AppState, MysqlMode, PoolKind, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -3836,17 +3887,24 @@ mod tests {
         assert_eq!(legacy.db_type, DatabaseType::SqlServer);
         assert_eq!(legacy.driver_profile.as_deref(), Some(crate::db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE));
         assert_eq!(legacy.driver_label.as_deref(), Some(crate::db::sqlserver::SQLSERVER_LEGACY_DRIVER_LABEL));
+        assert!(sqlserver_uses_legacy_driver(&legacy));
     }
 
     #[test]
-    fn sqlserver_legacy_agent_error_mentions_driver_manager_when_missing() {
-        let message = sqlserver_legacy_agent_error(
-            "native failed",
+    fn sqlserver_legacy_url_param_does_not_force_agent_driver() {
+        let mut config = mysql_config(Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.url_params = Some("applicationName=dbx;encrypt=false".to_string());
+
+        assert!(!sqlserver_uses_legacy_driver(&config));
+    }
+
+    #[test]
+    fn sqlserver_legacy_driver_error_mentions_driver_manager_when_missing() {
+        let message = sqlserver_legacy_driver_error(
             "sqlserver-legacy driver is not installed. Please install it from the Driver Manager.",
         );
 
-        assert!(message.contains("native failed"));
-        assert!(message.contains("Fallback with SQL Server legacy compatibility component failed"));
         assert!(message.contains("Driver Manager"));
         assert!(message.contains("enable SQL Server legacy compatibility mode again"));
     }
@@ -4268,20 +4326,23 @@ mod tests {
     async fn test_tunnel_profile_rejects_non_ssh_and_missing_host() {
         let (state, dir) = test_app_state().await;
 
-        // Non-SSH profiles cannot be tested in isolation (they connect lazily).
+        // Proxy profiles now attempt a connection; with no proxy running at the
+        // test address the result is a connection error, not an SSH-only guard.
+        let test_port = portpicker::pick_unused_port().expect("no port available");
         let proxy = TransportLayerConfig::Proxy(ProxyTunnelConfig {
             id: "p1".to_string(),
             name: String::new(),
             enabled: true,
             proxy_type: ProxyType::Socks5,
             host: "127.0.0.1".to_string(),
-            port: 1080,
+            port: test_port,
             username: String::new(),
             password: String::new(),
+            test_target: None,
             profile_id: String::new(),
         });
         let err = state.test_tunnel_profile(&proxy).await.unwrap_err();
-        assert!(err.contains("SSH"), "unexpected error: {err}");
+        assert!(!err.contains("SSH"), "proxy test should not return SSH error, got: {err}");
 
         // An SSH profile with no host fails fast rather than dialing an empty host.
         let ssh = TransportLayerConfig::Ssh(SshTunnelConfig {
@@ -5217,6 +5278,26 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn detach_client_session_pool_removes_pool_before_background_close() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::Sqlite;
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let pool_key = "conn:session:import-1";
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        state.connections.write().await.insert(pool_key.to_string(), PoolKind::Sqlite(pool));
+        state.pool_activity.write().await.insert(pool_key.to_string(), super::PoolActivity::now());
+
+        assert!(state.detach_client_session_pool("conn", None, "import-1").await.unwrap());
+        assert!(!state.connections.read().await.contains_key(pool_key));
+        assert!(!state.pool_activity.read().await.contains_key(pool_key));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn closing_oracle_table_tab_keeps_connection_scoped_pool() {
         let (state, dir) = test_app_state().await;
         let mut config = mysql_config(Some("ORCLPDB1"));
@@ -5381,6 +5462,7 @@ for line in sys.stdin:
             port: 1080,
             username: String::new(),
             password: String::new(),
+            test_target: None,
             profile_id: profile_id.to_string(),
         }
     }
@@ -5494,12 +5576,12 @@ for line in sys.stdin:
             port: 65000,
             username: String::new(),
             password: String::new(),
+            test_target: None,
         })];
 
-        let (host, port) = state.connection_host_port("proxied", &config).await.unwrap();
+        let (host, _port) = state.connection_host_port("proxied", &config).await.unwrap();
 
         assert_eq!(host, "127.0.0.1");
-        assert_ne!(port, config.port);
         state.proxy_tunnels.stop_tunnel("proxied:transport:0").await;
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5543,6 +5625,7 @@ for line in sys.stdin:
             port: 65000,
             username: String::new(),
             password: String::new(),
+            test_target: None,
         })];
 
         let mqc = state.mq_admin_config_for_connection("proxied-mq", &config).await.unwrap();
@@ -5601,6 +5684,7 @@ for line in sys.stdin:
             port: 65000,
             username: String::new(),
             password: String::new(),
+            test_target: None,
         })];
 
         let nacos_config = state.nacos_admin_config_for_connection("proxied-nacos", &config).await.unwrap();

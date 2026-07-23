@@ -35,6 +35,52 @@ function semanticCompletion(markedSql: string, input: Partial<SqlCompletionProvi
 }
 
 describe("semantic SQL completion candidates", () => {
+  it("isolates SQL Server columns for database-qualified tables with the same schema and name", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+      ["DatabaseA.OUT.orders", [{ name: "source_marker", table: "orders", schema: "OUT" }]],
+      ["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]],
+    ]);
+    const { context, items } = semanticCompletion("SELECT * FROM [DatabaseA].[OUT].[orders] a LEFT JOIN [DatabaseB].[OUT].[orders] b ON b.|", { columnsByTable }, { databaseType: "sqlserver", dialect: "sqlserver" });
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "orders", database: "DatabaseB", schema: "OUT", alias: "b" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["target_marker"]);
+  });
+
+  it("resolves columns after a full SQL Server database.schema.table qualifier", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["DatabaseB.OUT.orders", [{ name: "target_marker", table: "orders", schema: "OUT" }]]]);
+    const { context, items } = semanticCompletion("SELECT * FROM [DatabaseB].[OUT].[orders] WHERE [DatabaseB].[OUT].[orders].|", { columnsByTable }, { databaseType: "sqlserver", dialect: "sqlserver" });
+
+    expect(context.qualifierParts).toEqual(["DatabaseB", "OUT", "orders"]);
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["target_marker"]);
+  });
+  it.each([
+    ["MySQL ORDER BY", "SELECT * FROM t LIMIT 100 or|", "mysql", "mysql", "ORDER BY"],
+    ["PostgreSQL ON CONFLICT", "INSERT INTO t VALUES (1) on|", "postgres", "postgres", "ON CONFLICT"],
+    ["Oracle EXECUTE IMMEDIATE", "exec|", "oracle", undefined, "EXECUTE IMMEDIATE"],
+  ] as const)("keeps the longer %s keyword available before the current token is committed", (_label, sql, databaseType, dialect, expectedKeyword) => {
+    const { context, items } = semanticCompletion(sql, {}, { databaseType, dialect });
+
+    expect(context.suggestKeywords).toBe(false);
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: expectedKeyword, type: "keyword" })]));
+  });
+
+  it("does not offer keyword continuations for qualified column prefixes", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["t", [{ name: "order_number", table: "t" }]]]);
+    const { context, items } = semanticCompletion("SELECT * FROM t WHERE t.or|", { columnsByTable }, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.qualifier).toBe("t");
+    expect(items.some((item) => item.label === "ORDER BY")).toBe(false);
+  });
+
+  it("stops offering ORDER BY as a prefix continuation after OR is committed with whitespace", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["t", [{ name: "id", table: "t" }]]]);
+    const { context, items } = semanticCompletion("SELECT * FROM t WHERE id = 1 OR |", { columnsByTable }, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.prefix).toBe("");
+    expect(items.some((item) => item.label === "ORDER BY")).toBe(false);
+    expect(items.some((item) => item.label === "id" && item.type === "column")).toBe(true);
+  });
+
   it("keeps matching functions available in column expressions", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       [

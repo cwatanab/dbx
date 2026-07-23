@@ -20,6 +20,15 @@ pub async fn list_databases(
 }
 
 #[tauri::command]
+pub async fn list_database_storage(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    databases: Vec<String>,
+) -> Result<Vec<db::DatabaseStorageInfo>, String> {
+    dbx_core::schema::list_database_storage_core(&state, &connection_id, &databases).await
+}
+
+#[tauri::command]
 pub async fn list_doris_catalogs(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -292,12 +301,21 @@ pub async fn get_columns(
     schema: String,
     table: String,
     catalog: Option<String>,
+    client_session_id: Option<String>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
     if let Some(catalog) = external_doris_catalog(&state, &connection_id, catalog.as_deref()).await {
         return dbx_core::schema::get_doris_catalog_columns_core(&state, &connection_id, &catalog, &database, &table)
             .await;
     }
-    dbx_core::schema::get_columns_core(&state, &connection_id, &database, &schema, &table).await
+    dbx_core::schema::get_columns_core_for_session(
+        &state,
+        &connection_id,
+        &database,
+        &schema,
+        &table,
+        client_session_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -428,9 +446,9 @@ pub async fn list_extensions(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
-    schema: String,
+    schema: Option<String>,
 ) -> Result<Vec<db::ExtensionInfo>, String> {
-    dbx_core::schema::list_extensions_core(&state, &connection_id, &database, &schema).await
+    dbx_core::schema::list_extensions_core(&state, &connection_id, &database, schema.as_deref()).await
 }
 
 #[tauri::command]

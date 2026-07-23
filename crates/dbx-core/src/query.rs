@@ -13,7 +13,10 @@ use sqlparser::parser::Parser;
 use std::collections::HashSet;
 use std::future::Future;
 use std::ops::ControlFlow;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Duration;
 #[cfg(feature = "duckdb-bundled")]
 use tokio::task::JoinHandle;
@@ -1022,6 +1025,84 @@ fn timeout_error_for(timeout_duration: Duration) -> String {
 
 pub fn canceled_error() -> String {
     QUERY_CANCELED.to_string()
+}
+
+pub(crate) struct StreamProgressClock {
+    started_at: tokio::time::Instant,
+    last_progress_ms: AtomicU64,
+}
+
+impl StreamProgressClock {
+    pub(crate) fn new() -> Self {
+        Self { started_at: tokio::time::Instant::now(), last_progress_ms: AtomicU64::new(0) }
+    }
+
+    pub(crate) fn mark(&self) {
+        self.last_progress_ms.store(self.started_at.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn elapsed_since_progress(&self) -> Duration {
+        let last_progress_ms = self.last_progress_ms.load(Ordering::Relaxed);
+        let elapsed_ms = self.started_at.elapsed().as_millis() as u64;
+        Duration::from_millis(elapsed_ms.saturating_sub(last_progress_ms))
+    }
+}
+
+pub(crate) async fn await_stream_with_progress_timeout<F, T>(
+    stream_future: F,
+    timeout: Option<Duration>,
+    progress_clock: Arc<StreamProgressClock>,
+    cancel_token: Option<&CancellationToken>,
+    timeout_message: String,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let Some(timeout) = timeout else {
+        return match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => Err(canceled_error()),
+                    result = stream_future => result,
+                }
+            }
+            None => stream_future.await,
+        };
+    };
+
+    tokio::pin!(stream_future);
+    loop {
+        // Query timeout is an inactivity budget, not a cap on total stream duration.
+        let remaining = timeout.saturating_sub(progress_clock.elapsed_since_progress());
+        if remaining.is_zero() {
+            return Err(timeout_message.clone());
+        }
+        let sleep = tokio::time::sleep(remaining);
+        tokio::pin!(sleep);
+
+        match cancel_token {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(canceled_error()),
+                    result = &mut stream_future => return result,
+                    _ = &mut sleep => {},
+                }
+            }
+            None => {
+                tokio::select! {
+                    biased;
+                    result = &mut stream_future => return result,
+                    _ = &mut sleep => {},
+                }
+            }
+        }
+
+        if progress_clock.elapsed_since_progress() >= timeout {
+            return Err(timeout_message);
+        }
+    }
 }
 
 #[cfg(feature = "duckdb-bundled")]
@@ -2470,17 +2551,30 @@ pub async fn execute_statements_in_transaction(
             .map_err(|e| query_error_with_omitted_sql_context(&e, sql_ctx))?
     };
 
+    execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, statements, schema).await
+}
+
+/// Execute multiple SQL statements transactionally on an already-resolved pool.
+/// This preserves session-scoped pools used by long-running imports.
+pub async fn execute_statements_in_transaction_on_pool(
+    state: &AppState,
+    pool_key: &str,
+    connection_id: &str,
+    database: &str,
+    statements: &[String],
+    schema: Option<&str>,
+) -> Result<db::QueryResult, String> {
     // Read-only check: intercept all transaction paths before dispatching
-    check_read_only_for_connection_multi(state, &pool_key, statements).await?;
+    check_read_only_for_connection_multi(state, pool_key, statements).await?;
 
     let start = std::time::Instant::now();
     let db_type = connection_database_type(state, connection_id).await;
-    let operation_budget = configured_operation_budget_for_pool_key(state, &pool_key).await;
+    let operation_budget = configured_operation_budget_for_pool_key(state, pool_key).await;
 
     // Clone the pool handle within the lock, then drop it before any async work.
     let path = {
         let conns = state.connections.read().await;
-        conns.get(&pool_key).map(|p| match p {
+        conns.get(pool_key).map(|p| match p {
             PoolKind::Postgres(pg) => TxPath::Pg(pg.clone()),
             PoolKind::Mysql(mp, _mode) => TxPath::Mysql(mp.clone(), false),
             PoolKind::Sqlite(sq) => TxPath::Sqlite(sq.clone()),
@@ -2516,11 +2610,11 @@ pub async fn execute_statements_in_transaction(
 
     let result = match path {
         Some(TxPath::Pg(pool)) => {
-            let cancel_context = state.get_postgres_cancel_context(&pool_key).await;
+            let cancel_context = state.get_postgres_cancel_context(pool_key).await;
             exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
         }
         Some(TxPath::Mysql(pool, _bare)) => {
-            exec_tx_mysql_inner(state, &pool_key, pool, statements, start, operation_budget.clone()).await
+            exec_tx_mysql_inner(state, pool_key, pool, statements, start, operation_budget.clone()).await
         }
         Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await,
         Some(TxPath::CloudflareD1(client)) => {
@@ -2534,18 +2628,18 @@ pub async fn execute_statements_in_transaction(
         }
         Some(TxPath::Explicit) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-            exec_tx_explicit_inner(state, &pool_key, mysql_dialect, Some(database), statements, schema, start).await
+            exec_tx_explicit_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start).await
         }
         Some(TxPath::None) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-            exec_tx_none_inner(state, &pool_key, mysql_dialect, Some(database), statements, schema, start).await
+            exec_tx_none_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start).await
         }
         None => Err("Connection not found for transaction".to_string()),
     };
 
     if let Err(err) = result.as_ref() {
         if matches!(pool_error_action(db_type, err), PoolErrorAction::Discard | PoolErrorAction::ReconnectAndRetry) {
-            state.remove_pool_by_key(&pool_key).await;
+            state.remove_pool_by_key(pool_key).await;
         }
     }
 

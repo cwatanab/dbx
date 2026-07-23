@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type ComponentPublicInstance, type CSSProperties } from "vue";
+import { ref, shallowRef, computed, nextTick, watch, provide, onMounted, onUnmounted, type Component, type ComponentPublicInstance, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Search, X, ListFilter, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw } from "@lucide/vue";
+import { Search, X, ListFilter, ListOrdered, ArrowDownAZ, ArrowUpZA, Crosshair, Server, Database, FolderTree, Table2, Eye, RotateCcw } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -37,6 +37,10 @@ import { createSidebarActionTarget, findSidebarActionTarget, type SidebarActionT
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
 import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
+import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
+import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
+import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNodeComment } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { sidebarTableStorageScopes, supportsSidebarTableStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -247,6 +251,20 @@ const searchScopeMenuItems = computed(() => [
     : []),
 ]);
 
+const connectionListSortMenuItems = computed(() => [
+  { value: "manual", label: t("sidebar.sortConnectionsManual"), icon: ListOrdered },
+  { value: "asc", label: t("sidebar.sortConnectionsAscending"), icon: ArrowDownAZ },
+  { value: "desc", label: t("sidebar.sortConnectionsDescending"), icon: ArrowUpZA },
+]);
+
+const isConnectionListAlphabeticallySorted = computed(() => settingsStore.editorSettings.sidebarConnectionSortMode !== "manual");
+
+function updateConnectionListSortMode(mode: string) {
+  if (mode === "manual" || mode === "asc" || mode === "desc") {
+    settingsStore.updateEditorSettings({ sidebarConnectionSortMode: mode });
+  }
+}
+
 const hasSearchScopeFilter = computed(() => selectedSearchScopes.value.length > 0);
 const searchableNodeTypes = computed<Set<TreeNodeType> | undefined>(() => {
   if (!hasSearchScopeFilter.value) return undefined;
@@ -321,12 +339,14 @@ function focusTableSearchInput(parentNodeId: string) {
   });
 }
 
+const displayedTreeNodes = computed(() => sortConnectionListForDisplay(store.treeNodes, settingsStore.editorSettings.sidebarConnectionSortMode));
+
 const filteredNodes = computed(() => {
-  let nodes = store.treeNodes;
+  let nodes = displayedTreeNodes.value;
 
   const q = deferredSearchQuery.value;
+  nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value);
   if (q) {
-    nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value);
     nodes = filterSidebarSearchRootsByConnectionState(nodes, store.connectedIds);
   }
 
@@ -339,6 +359,64 @@ const flatNodes = computed<FlatTreeNode[]>(() =>
     sidebarObjectDisplay: settingsStore.editorSettings.sidebarObjectDisplay,
     activeQueries: store.sidebarTableSearchQueries,
   }),
+);
+
+const sidebarCommentLabelWidths = shallowRef(new Map<string, number>());
+let sidebarCommentMeasureFrame = 0;
+const sidebarTableNameDisplayTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "mongo-collection", "vector-collection", "elasticsearch-index"]);
+
+function sidebarCommentLabel(node: TreeNode): string {
+  const label = sidebarTableNameDisplayTypes.has(node.type) ? sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes) : node.label;
+  return node.valid === false ? `${label} · INVALID` : label;
+}
+
+function measureSidebarCommentLabelWidths() {
+  sidebarCommentMeasureFrame = 0;
+  if (settingsStore.editorSettings.sidebarObjectInfoMode !== "comment-aligned" || typeof document === "undefined" || !rootRef.value) {
+    sidebarCommentLabelWidths.value = new Map();
+    return;
+  }
+
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return;
+  const style = window.getComputedStyle(rootRef.value);
+  context.font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  sidebarCommentLabelWidths.value = alignedSidebarCommentLabelWidths(
+    flatNodes.value.map(({ id, depth, node }) => ({
+      id,
+      depth,
+      alignable: isSidebarCommentAlignableNode(node),
+      hasComment: !!sidebarTreeNodeComment(node),
+      labelWidth: context.measureText(sidebarCommentLabel(node)).width,
+    })),
+  );
+}
+
+function scheduleSidebarCommentLabelMeasure() {
+  if (typeof window === "undefined") {
+    measureSidebarCommentLabelWidths();
+    return;
+  }
+  if (sidebarCommentMeasureFrame) window.cancelAnimationFrame(sidebarCommentMeasureFrame);
+  sidebarCommentMeasureFrame = window.requestAnimationFrame(measureSidebarCommentLabelWidths);
+}
+
+watch([flatNodes, () => settingsStore.editorSettings.sidebarObjectInfoMode, () => settingsStore.editorSettings.sidebarHiddenTablePrefixes, () => settingsStore.editorSettings.uiFontFamily, () => settingsStore.editorSettings.uiScale], scheduleSidebarCommentLabelMeasure, {
+  flush: "post",
+  immediate: true,
+});
+
+const visibleSidebarTableStorageScopes = computed(() => {
+  if (settingsStore.editorSettings.sidebarObjectInfoMode !== "size") return [];
+  return sidebarTableStorageScopes(flatNodes.value.map(({ node }) => node)).filter((scope) => supportsSidebarTableStorage(store.getConfig(scope.connectionId)));
+});
+
+watch(
+  visibleSidebarTableStorageScopes,
+  (scopes) => {
+    for (const scope of scopes) void store.loadSidebarTableStorage(scope);
+  },
+  { flush: "post", immediate: true },
 );
 // Build all lookup tables in one linear pass whenever the visible tree changes.
 // Selection, scrolling and sticky headers then avoid repeated full-array scans.
@@ -1034,7 +1112,7 @@ async function executeSidebarProcedureSql(sql: string) {
 }
 
 async function refreshSidebarActionTarget() {
-  const target = sidebarObjectSourceTarget.value?.node || sidebarDdlTarget.value;
+  const target = sidebarObjectSourceTarget.value?.node || sidebarDdlTarget.value || sidebarInstallExtensionTarget.value;
   if (!target) return;
   const currentTarget = findSidebarActionTarget(store.treeNodes, target);
   if (!currentTarget) return;
@@ -1289,6 +1367,7 @@ onUnmounted(() => {
   sidebarScrollbarResizeObserver?.disconnect();
   window.cancelAnimationFrame(sidebarScrollbarAnimationFrame);
   window.clearTimeout(sidebarScrollingTimer);
+  if (sidebarCommentMeasureFrame) window.cancelAnimationFrame(sidebarCommentMeasureFrame);
 });
 
 defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
@@ -1334,6 +1413,23 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           <Crosshair class="h-3.5 w-3.5" />
         </button>
         <LightDropdown
+          :model-value="settingsStore.editorSettings.sidebarConnectionSortMode"
+          :items="connectionListSortMenuItems"
+          :aria-label="t('sidebar.sortConnections')"
+          :label="t('sidebar.sortConnections')"
+          :trigger-title="t('sidebar.sortConnections')"
+          :trigger-class="['shrink-0 h-6 w-6 flex items-center justify-center rounded border border-border hover:bg-accent', isConnectionListAlphabeticallySorted ? 'text-primary bg-primary/10 border-primary/30' : 'text-muted-foreground'].join(' ')"
+          trigger-icon-class="h-3.5 w-3.5"
+          item-icon-class="h-3.5 w-3.5"
+          content-class="w-max min-w-0"
+          selected-item-class="bg-primary/10 text-primary"
+          selected-check-class="text-primary"
+          :show-trigger-label="false"
+          :show-chevron="false"
+          align="end"
+          @update:model-value="updateConnectionListSortMode"
+        />
+        <LightDropdown
           v-if="searchScopeOptions.length > 0"
           model-value=""
           :items="searchScopeMenuItems"
@@ -1376,9 +1472,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             <TreeItem
               :node="item.node"
               :depth="item.depth"
-              :drag-disabled="isFiltering"
+              :drag-disabled="isFiltering || isConnectionListAlphabeticallySorted"
               :pending-rename="pendingRenameGroupId === item.node.id"
               :highlighted="highlightedNodeId === item.node.id"
+              :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
               @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
               @rename-started="pendingRenameGroupId = null"
               @group-created="startRenamingCreatedGroup"
@@ -1386,7 +1483,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
           </template>
         </RecycleScroller>
         <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
-          <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)" />
+          <TreeItem :node="stickyNode.node" :depth="stickyNode.depth" :drag-disabled="true" :comment-label-width="sidebarCommentLabelWidths.get(stickyNode.node.id)" @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)" />
         </div>
         <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">
           <div class="sidebar-tree-scrollbar__thumb" :style="sidebarScrollbarThumbStyle" @pointerdown.stop="onSidebarScrollbarThumbPointerDown" />
@@ -1399,9 +1496,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
             :key="item.id"
             :node="item.node"
             :depth="item.depth"
-            :drag-disabled="isFiltering"
+            :drag-disabled="isFiltering || isConnectionListAlphabeticallySorted"
             :pending-rename="pendingRenameGroupId === item.node.id"
             :highlighted="highlightedNodeId === item.id"
+            :comment-label-width="sidebarCommentLabelWidths.get(item.node.id)"
             @context-menu="(event, node) => openSidebarContextMenu(event, node, contextMenuSlot.onContextMenu)"
             @rename-started="pendingRenameGroupId = null"
             @group-created="startRenamingCreatedGroup"
@@ -1487,7 +1585,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       </template>
     </SidebarDangerConfirmDialog>
     <SidebarTreeItemDialogs v-if="sidebarTreeItemDialogController" :key="sidebarTreeItemDialogController.node?.id" :controller="sidebarTreeItemDialogController" @closed="sidebarTreeItemDialogController = null" />
-    <InstallExtensionDialog v-if="sidebarInstallExtensionTarget" ref="sidebarInstallExtensionDialogRef" :node="sidebarInstallExtensionTarget" @close="refreshSidebarActionTarget" />
+    <InstallExtensionDialog v-if="sidebarInstallExtensionTarget" ref="sidebarInstallExtensionDialogRef" :node="sidebarInstallExtensionTarget" @close="refreshSidebarActionTarget" @changed="refreshSidebarActionTarget" />
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t("sidebar.noConnections") }}
     </div>

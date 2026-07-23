@@ -3,6 +3,7 @@ import type {
   ConnectionTestResult,
   DatabaseConnectionInfo,
   DatabaseInfo,
+  DatabaseStorageInfo,
   SchemaInfo,
   LinkedServerInfo,
   CatalogInfo,
@@ -78,6 +79,9 @@ import type {
   MongoCollectionStatsResult,
   MongoGridFsBucketInfo,
   HistoryEntry,
+  HistorySearchRequest,
+  HistorySearchResult,
+  HistoryConnectionOption,
   SqlFileRequest,
   SqlFilePreview,
   SqlFileProgress,
@@ -106,6 +110,7 @@ import type {
   DroppedFilePreviewSqlOptions,
   MongoGridFsFileInfo,
   AppSupportInfo,
+  PromptTemplate,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
@@ -196,6 +201,16 @@ async function get<T>(url: string): Promise<T> {
 
 async function del<T>(url: string): Promise<T> {
   const res = await fetch(apiUrl(url), { method: "DELETE" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function put<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(apiUrl(url), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -457,22 +472,24 @@ export async function importAgentsFromZip(fileOrPath: string | File): Promise<nu
   return result.count;
 }
 
-export async function importAgentJar(dbType: string, pathOrFile: string | File): Promise<void> {
+export async function importAgentDriver(dbType: string, pathOrFile: string | File): Promise<void> {
   let blob: Blob;
   let fileName: string;
   if (pathOrFile instanceof File) {
     blob = pathOrFile;
     fileName = pathOrFile.name;
   } else {
-    fileName = pathOrFile.split("/").pop() || "driver.jar";
+    fileName = pathOrFile.split("/").pop() || "agent";
     blob = await (await fetch(pathOrFile)).blob();
   }
   const formData = new FormData();
   formData.append("dbType", dbType);
   formData.append("file", blob, fileName);
-  const uploadRes = await fetch(apiUrl("/api/agents/import-jar"), { method: "POST", body: formData });
+  const uploadRes = await fetch(apiUrl("/api/agents/import-driver"), { method: "POST", body: formData });
   if (!uploadRes.ok) throw new Error(await uploadRes.text());
 }
+
+export const importAgentJar = importAgentDriver;
 
 export async function reinstallJre(jreKey?: string, _source?: UpdateDownloadSource): Promise<void> {
   await post("/api/agents/reinstall-jre", { jreKey });
@@ -552,6 +569,10 @@ export async function syncSavedSqlDirectory(_request: SavedSqlSyncRequest): Prom
 
 export async function listDatabases(connectionId: string): Promise<DatabaseInfo[]> {
   return get(`/api/schema/databases?${qs({ connection_id: connectionId })}`);
+}
+
+export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
+  return post("/api/schema/database-storage", { connection_id: connectionId, databases });
 }
 
 export async function listDorisCatalogs(connectionId: string): Promise<CatalogInfo[]> {
@@ -638,8 +659,8 @@ export async function getObjectSource(connectionId: string, database: string, sc
   return get(`/api/schema/object-source?${qs({ connection_id: connectionId, database, schema, table: name, object_type: objectType, signature })}`);
 }
 
-export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ColumnInfo[]> {
-  return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
+  return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog, client_session_id: clientSessionId })}`);
 }
 
 export async function getSqlServerColumnMetadata(connectionId: string, database: string, schema: string, table: string): Promise<SqlServerColumnMetadata[]> {
@@ -699,7 +720,7 @@ export async function listOwners(connectionId: string, database: string, schema:
   return get(`/api/schema/owners?${qs({ connection_id: connectionId, database, schema })}`);
 }
 
-export async function listExtensions(connectionId: string, database: string, schema: string): Promise<ExtensionInfo[]> {
+export async function listExtensions(connectionId: string, database: string, schema?: string): Promise<ExtensionInfo[]> {
   return get(`/api/schema/extensions?${qs({ connection_id: connectionId, database, schema })}`);
 }
 
@@ -1399,6 +1420,31 @@ export async function deleteAiConversation(id: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Prompt Templates
+// ---------------------------------------------------------------------------
+
+export async function loadPromptTemplates(): Promise<PromptTemplate[]> {
+  return get("/api/prompt-templates");
+}
+
+export async function savePromptTemplate(id: string, name: string, content: string): Promise<PromptTemplate> {
+  return post("/api/prompt-templates", { id, name, content });
+}
+
+export async function deletePromptTemplate(id: string): Promise<void> {
+  return del(`/api/prompt-templates/${encodeURIComponent(id)}`);
+}
+
+export async function getAiGlobalCustomInstructions(): Promise<string> {
+  const result = await get<{ content: string }>("/api/prompt-templates/global-instructions");
+  return result.content ?? "";
+}
+
+export async function setAiGlobalCustomInstructions(content: string): Promise<void> {
+  return put("/api/prompt-templates/global-instructions", { content });
+}
+
+// ---------------------------------------------------------------------------
 // SQL File Execution
 // ---------------------------------------------------------------------------
 
@@ -1528,10 +1574,15 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
     if (!options.sourceRef) {
       throw new Error("previewTableImportFile in web mode requires a File object for new uploads");
     }
-    const res = await fetch(apiUrl("/api/import/preview"), {
+    const res = await fetch(apiUrl("/api/import/preview-source"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ request: { ...options, filePath: fileOrPath } }),
+      body: JSON.stringify({
+        sourceRef: options.sourceRef,
+        sourceFormat: options.sourceFormat,
+        parseOptions: options.parseOptions,
+        previewLimit: options.previewLimit,
+      }),
     });
     if (!res.ok) throw new Error(await res.text());
     return res.json();
@@ -1567,6 +1618,7 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
           importId: progress.importId,
           rowsImported: progress.rowsImported,
           totalRows: progress.totalRows,
+          elapsedMs: progress.elapsedMs,
         };
         es.close();
         resolve(summary);
@@ -1584,6 +1636,11 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
 
 export async function cancelTableImport(importId: string): Promise<boolean> {
   return post("/api/import/cancel", { importId });
+}
+
+export async function releaseTableImportSource(sourceRef: string): Promise<boolean> {
+  const result = await post<{ released: boolean }>("/api/import/source/release", { sourceRef });
+  return result.released;
 }
 
 // ---------------------------------------------------------------------------
@@ -2078,6 +2135,10 @@ export async function mongoDropCollection(connectionId: string, database: string
   await post("/api/mongo/drop-collection", { connectionId, database, collection });
 }
 
+export async function mongoRenameCollection(connectionId: string, database: string, collection: string, newName: string): Promise<void> {
+  await post("/api/mongo/rename-collection", { connectionId, database, collection, newName });
+}
+
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
   const collections = await documentListCollections(connectionId, "default");
   return collections.map((c) => c.name);
@@ -2245,6 +2306,14 @@ export async function loadHistory(limit: number, offset: number, activityKind?: 
   return get(`/api/history?${qs({ limit, offset, activity_kind: activityKind })}`);
 }
 
+export async function searchHistory(request: HistorySearchRequest): Promise<HistorySearchResult> {
+  return post("/api/history/search", request);
+}
+
+export async function loadHistoryConnectionOptions(): Promise<HistoryConnectionOption[]> {
+  return get("/api/history/options");
+}
+
 export async function loadRedisHistory(limit = 100, offset = 0): Promise<HistoryEntry[]> {
   return loadHistory(limit, offset, "redis_command");
 }
@@ -2266,8 +2335,11 @@ export async function deleteHistoryEntry(id: string): Promise<void> {
 // Updates
 // ---------------------------------------------------------------------------
 
-export async function checkForUpdates(locale?: string): Promise<UpdateInfo> {
-  const query = locale ? `?locale=${encodeURIComponent(locale)}` : "";
+export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
+  const params = new URLSearchParams();
+  if (locale) params.set("locale", locale);
+  if (source) params.set("source", source);
+  const query = params.size > 0 ? `?${params.toString()}` : "";
   return get(`/api/update/check${query}`);
 }
 
@@ -2286,6 +2358,7 @@ export async function checkMcpServerStatus(): Promise<import("@/lib/backend/taur
     latest_version: null,
     update_available: false,
     bin_path: null,
+    native_bin_path: null,
     script_path: null,
     install_command: "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org",
     update_command: "npm install -g @dbx-app/mcp-server@latest --registry=https://registry.npmjs.org",

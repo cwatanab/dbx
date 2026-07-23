@@ -1,9 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy } from "@/stores/settingsStore";
+import { enforceRightSidebarPanelExclusivity, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, transitionRightSidebarPanels, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { createPinia, setActivePinia } from "pinia";
+import { isProxy } from "vue";
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
+  it("uses aligned comments by default and preserves legacy comment visibility", () => {
+    expect(normalizeEditorSettings({}).sidebarObjectInfoMode).toBe("comment-aligned");
+    expect(normalizeEditorSettings({ sidebarObjectInfoMode: "comment-aligned" }).sidebarObjectInfoMode).toBe("comment-aligned");
+    expect(normalizeEditorSettings({ sidebarObjectInfoMode: "comment-inline" }).sidebarObjectInfoMode).toBe("comment-inline");
+    expect(normalizeEditorSettings({ sidebarObjectInfoMode: "size" }).sidebarObjectInfoMode).toBe("size");
+    expect(normalizeEditorSettings({ sidebarTableCommentLayout: "aligned" } as any).sidebarObjectInfoMode).toBe("comment-aligned");
+    expect(normalizeEditorSettings({ sidebarTableCommentLayout: "hidden" } as any).sidebarObjectInfoMode).toBe("hidden");
+    expect(normalizeEditorSettings({ sidebarHideTableComments: false } as any).sidebarObjectInfoMode).toBe("comment-aligned");
+    expect(normalizeEditorSettings({ sidebarHideTableComments: true } as any).sidebarObjectInfoMode).toBe("hidden");
+    expect(normalizeEditorSettings({ sidebarHideTableComments: true, sidebarShowDatabaseSizes: true } as any).sidebarObjectInfoMode).toBe("hidden");
+    expect(normalizeEditorSettings({ sidebarShowDatabaseSizes: true } as any).sidebarObjectInfoMode).toBe("size");
+    expect(normalizeEditorSettings({ sidebarObjectInfoMode: "invalid" } as any).sidebarObjectInfoMode).toBe("comment-aligned");
+  });
+
   it("defaults SQL execution to the current statement and migrates legacy execute-all settings", () => {
     expect(normalizeEditorSettings({}).executeMode).toBe("current");
     expect(normalizeEditorSettings({ executeMode: "all" }).executeMode).toBe("current");
@@ -16,6 +31,13 @@ describe("normalizeEditorSettings", () => {
 
   it("preserves disabled automatic table aliases", () => {
     expect(normalizeEditorSettings({ autoAliasTables: false }).autoAliasTables).toBe(false);
+  });
+
+  it("defaults sidebar connection sorting to manual order and preserves valid alphabetical modes", () => {
+    expect(normalizeEditorSettings({}).sidebarConnectionSortMode).toBe("manual");
+    expect(normalizeEditorSettings({ sidebarConnectionSortMode: "asc" }).sidebarConnectionSortMode).toBe("asc");
+    expect(normalizeEditorSettings({ sidebarConnectionSortMode: "desc" }).sidebarConnectionSortMode).toBe("desc");
+    expect(normalizeEditorSettings({ sidebarConnectionSortMode: "invalid" as any }).sidebarConnectionSortMode).toBe("manual");
   });
 
   it("shows the current statement frame by default", () => {
@@ -101,6 +123,13 @@ describe("normalizeEditorSettings", () => {
     expect(invalid.dataGridHideNullColumns).toBe(false);
   });
 
+  it("defaults the data grid font and preserves a custom font family", () => {
+    const defaultFontFamily = `"Geist Variable Tabular", "Geist Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif`;
+    expect(normalizeEditorSettings({}).tableFontFamily).toBe(defaultFontFamily);
+    expect(normalizeEditorSettings({ tableFontFamily: "'IBM Plex Mono', monospace" }).tableFontFamily).toBe("'IBM Plex Mono', monospace");
+    expect(normalizeEditorSettings({ tableFontFamily: "   " }).tableFontFamily).toBe(defaultFontFamily);
+  });
+
   it("shows cell detail metadata by default and preserves collapsed state", () => {
     expect(normalizeEditorSettings({}).cellDetailMetadataCollapsed).toBe(false);
     expect(normalizeEditorSettings({ cellDetailMetadataCollapsed: true }).cellDetailMetadataCollapsed).toBe(true);
@@ -117,6 +146,41 @@ describe("normalizeEditorSettings", () => {
     expect(settings.toolbarItems.sqlFileTree).toBe(false);
     expect(settings.toolbarItems.history).toBe(false);
     expect(settings.toolbarItems.sqlLibrary).toBe(true);
+    expect(settings.toolbarItems.exclusiveRightSidebarPanels).toBe(true);
+  });
+
+  it("preserves disabled right sidebar panel exclusivity", () => {
+    expect(
+      normalizeEditorSettings({
+        toolbarItems: {
+          exclusiveRightSidebarPanels: false,
+        } as any,
+      }).toolbarItems.exclusiveRightSidebarPanels,
+    ).toBe(false);
+  });
+});
+
+describe("right sidebar panel transitions", () => {
+  const state = (overrides: Partial<RightSidebarPanelState> = {}): RightSidebarPanelState => ({
+    ai: false,
+    history: false,
+    sqlLibrary: false,
+    sqlFile: false,
+    ...overrides,
+  });
+
+  it("allows multiple panels when exclusivity is disabled", () => {
+    expect(transitionRightSidebarPanels(state({ ai: true }), "history", true, false)).toEqual(state({ ai: true, history: true }));
+  });
+
+  it("switches panels and allows the active panel to toggle closed", () => {
+    const switched = transitionRightSidebarPanels(state({ ai: true }), "sqlLibrary", true, true);
+    expect(switched).toEqual(state({ sqlLibrary: true }));
+    expect(transitionRightSidebarPanels(switched, "sqlLibrary", false, true)).toEqual(state());
+  });
+
+  it("collapses synchronized multi-panel state to the preferred open panel", () => {
+    expect(enforceRightSidebarPanelExclusivity(state({ ai: true, history: true, sqlFile: true }), "history")).toEqual(state({ history: true }));
   });
 });
 
@@ -254,6 +318,29 @@ describe("settingsStore MCP policy persistence", () => {
     rejectSave(new Error("save failed"));
     await expect(update).rejects.toThrow("save failed");
     expect(store.mcpGlobalPolicy).toEqual(previous);
+  });
+});
+
+describe("settingsStore sidebar connection sort persistence", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    setActivePinia(createPinia());
+  });
+
+  it("persists the selected alphabetical sort mode", async () => {
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.updateEditorSettings({ sidebarConnectionSortMode: "desc" });
+
+    expect(store.editorSettings.sidebarConnectionSortMode).toBe("desc");
+    expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ sidebarConnectionSortMode: "desc" }));
+    expect(isProxy(saveEditorSettings.mock.calls[0][0])).toBe(false);
+
+    await store.persistEditorSettings();
+    expect(isProxy(saveEditorSettings.mock.calls[1][0])).toBe(false);
   });
 });
 

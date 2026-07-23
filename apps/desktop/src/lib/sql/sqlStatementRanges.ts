@@ -246,6 +246,7 @@ const EXPLAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "WITH", "INSERT", "UPDATE"
 const CREATE_BODY_KEYWORDS = new Set(["SELECT", "WITH", "BEGIN", "DECLARE"]);
 const INSERT_BODY_KEYWORDS = new Set(["SELECT", "WITH"]);
 const ALTER_BODY_KEYWORDS = new Set(["ADD", "ALTER", "COMMENT", "DROP", "MODIFY", "RENAME", "SET"]);
+const CLICKHOUSE_ALTER_TABLE_HEADER = /^ALTER\s+TABLE\s+(?:(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")\s*\.\s*)?(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")(?:\s+ON\s+CLUSTER\s+(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+"|'(?:''|[^'])+'))?\s*$/i;
 const SET_OPERATION_KEYWORDS = new Set(["UNION", "INTERSECT", "EXCEPT", "MINUS"]);
 const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle"]);
@@ -682,6 +683,16 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
+    if (currentBodyKeyword === "ALTER" && isClickHouseAlterTableUpdateContinuation(sql, boundaries[boundaries.length - 1].from, lineStart.from, lineStart.keyword, databaseType)) {
+      // ClickHouse mutations use UPDATE as the first ALTER TABLE action, not as
+      // a standalone statement. Keep this dialect-specific to preserve soft boundaries elsewhere.
+      continue;
+    }
+
+    if (currentBodyKeyword === "ALTER" && isMysqlAlterTableTruncatePartitionContinuation(sql, boundaries[boundaries.length - 1].from, lineStart.from, lineStart.keyword, databaseType)) {
+      continue;
+    }
+
     if (currentBodyKeyword === "ALTER" && ALTER_BODY_KEYWORDS.has(lineStart.keyword)) {
       continue;
     }
@@ -917,6 +928,17 @@ function isMysqlCreateTableOptionContinuation(sql: string, statementFrom: number
   return next === "=" || next === "'" || next === '"';
 }
 
+function isClickHouseAlterTableUpdateContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "clickhouse" || keyword !== "UPDATE") return false;
+  return CLICKHOUSE_ALTER_TABLE_HEADER.test(sql.slice(statementFrom, lineStartFrom));
+}
+
+function isMysqlAlterTableTruncatePartitionContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType): boolean {
+  if (databaseType !== "mysql" || keyword !== "TRUNCATE") return false;
+  if (!startsWithSqlWords(sql, statementFrom, ["ALTER", "TABLE"])) return false;
+  return nextSqlWord(sql, lineStartFrom + keyword.length) === "PARTITION";
+}
+
 function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean {
   const text = sql.slice(statementFrom, statementFrom + 256);
   return /^CREATE\s+(?:TEMPORARY\s+)?TABLE\b/i.test(text);
@@ -1085,9 +1107,49 @@ function nextNonWhitespaceChar(sql: string, pos: number): string | null {
 }
 
 function nextSqlWord(sql: string, pos: number): string | null {
+  return nextSqlWordToken(sql, pos)?.word ?? null;
+}
+
+function startsWithSqlWords(sql: string, pos: number, expectedWords: readonly string[]): boolean {
   let i = pos;
-  while (i < sql.length && isSqlWhitespace(sql[i])) i += 1;
-  return /^[A-Za-z_][\w$]*/.exec(sql.slice(i))?.[0]?.toUpperCase() ?? null;
+  for (const expectedWord of expectedWords) {
+    const token = nextSqlWordToken(sql, i);
+    if (token?.word !== expectedWord) return false;
+    i = token.end;
+  }
+  return true;
+}
+
+function nextSqlWordToken(sql: string, pos: number): { word: string; end: number } | null {
+  let i = pos;
+  // SQL comments may legally appear anywhere whitespace can separate keywords.
+  while (i < sql.length) {
+    if (isSqlWhitespace(sql[i])) {
+      i += 1;
+      continue;
+    }
+    if (sql[i] === "-" && sql[i + 1] === "-") {
+      i += 2;
+      while (i < sql.length && sql[i] !== "\n" && sql[i] !== "\r") i += 1;
+      continue;
+    }
+    if (sql[i] === "#") {
+      i += 1;
+      while (i < sql.length && sql[i] !== "\n" && sql[i] !== "\r") i += 1;
+      continue;
+    }
+    if (sql[i] === "/" && sql[i + 1] === "*") {
+      const commentEnd = sql.indexOf("*/", i + 2);
+      if (commentEnd < 0) return null;
+      i = commentEnd + 2;
+      continue;
+    }
+    break;
+  }
+
+  const match = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
+  if (!match) return null;
+  return { word: match[0].toUpperCase(), end: i + match[0].length };
 }
 
 function isExplainLikeKeyword(keyword: string | null): boolean {

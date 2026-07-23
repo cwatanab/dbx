@@ -14,8 +14,9 @@ import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitionRightSidebarPanels, useSettingsStore, type RightSidebarPanelId, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useAppUpdater } from "@/composables/useAppUpdater";
@@ -45,7 +46,7 @@ import { sqlObjectNavigationSourceKind, sqlObjectNavigationTableType, type SqlOb
 import { buildExecutableObjectSourceStatements, executeObjectSourceSave } from "@/lib/table/objectSourceEditor";
 import { resolveExecutableSql, resolveExecutableSqlWithBackend, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { uuid } from "@/lib/common/utils";
-import { isMacOS } from "@/lib/backend/platform";
+import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
@@ -84,7 +85,7 @@ import { countAvailableAgentDriverUpdates, type AgentDriverUpdateBadgeState } fr
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { apiUrl, webPath } from "@/lib/common/webPath";
-import { APP_FONT_SANS_CSS_VAR, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
@@ -123,6 +124,7 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const savedSqlStore = useSavedSqlStore();
+const promptTemplateStore = usePromptTemplateStore();
 connectionStore.setBeforeConnectHandler((config) => ensureJdbcxRuntimeDrivers(config, api).then(() => undefined));
 const { message: toastMessage, visible: toastVisible, toast } = useToast();
 const { isDark, themeMode, applyTheme, setThemeMode } = useTheme();
@@ -152,7 +154,7 @@ const {
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
-const drawDesktopWindowFrame = shouldDrawDesktopWindowFrame(isMacOS(), isDesktop);
+const drawDesktopWindowFrame = shouldDrawDesktopWindowFrame(isMacOS(), isDesktop, isWindows());
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 const needsAuth = ref(!isDesktop);
@@ -179,6 +181,18 @@ const showHistory = ref(false);
 const showAiPanel = ref(safeLocalStorageGet("dbx-ai-panel-open") === "true");
 const showSqlLibraryPanel = ref(safeLocalStorageGet("dbx-sql-library-open") === "true");
 const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
+const rightSidebarPanelRefs: Record<RightSidebarPanelId, typeof showAiPanel> = {
+  ai: showAiPanel,
+  history: showHistory,
+  sqlLibrary: showSqlLibraryPanel,
+  sqlFile: showSqlFilePanel,
+};
+const rightSidebarPanelStorageKeys: Partial<Record<RightSidebarPanelId, string>> = {
+  ai: "dbx-ai-panel-open",
+  sqlLibrary: "dbx-sql-library-open",
+  sqlFile: "dbx-sql-file-panel-open",
+};
+let lastOpenedRightSidebarPanel = RIGHT_SIDEBAR_PANEL_IDS.find((panelId) => rightSidebarPanelRefs[panelId].value);
 const sidebarOpen = ref(safeLocalStorageGet("dbx-sidebar-open") !== "false");
 const aiPanelReady = ref(false);
 const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize } = usePanelResize();
@@ -190,6 +204,7 @@ const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 const selectedSql = ref("");
 const cursorPos = ref(0);
 const formatSqlRequest = ref<{ id: number; tabId: string } | null>(null);
+const compressSqlRequest = ref<{ id: number; tabId: string } | null>(null);
 const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
 const newQueryContextSource = ref<"tab" | "sidebar">("tab");
 const queryEditorDdlTarget = ref<{ connectionId: string; database: string; catalog?: string; schema?: string; tableName: string; objectType?: ObjectSourceKind } | null>(null);
@@ -488,6 +503,11 @@ function applyUiFontFamily(fontFamily: string) {
   document.body.style.fontFamily = `var(${APP_FONT_SANS_CSS_VAR}, ${DEFAULT_UI_FONT_FAMILY})`;
 }
 
+function applyDataGridFontFamily(fontFamily: string) {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(DATA_GRID_FONT_FAMILY_CSS_VAR, fontFamily || DEFAULT_DATA_GRID_FONT_FAMILY);
+}
+
 const appUiFontFamilyStyle = computed<Record<string, string>>(() => {
   const fontFamily = settingsStore.editorSettings.uiFontFamily || DEFAULT_UI_FONT_FAMILY;
   return {
@@ -549,19 +569,58 @@ watch(
   { immediate: true },
 );
 
-function toggleAiPanel() {
-  showAiPanel.value = !showAiPanel.value;
-  safeLocalStorageSet("dbx-ai-panel-open", String(showAiPanel.value));
+watch(
+  () => settingsStore.editorSettings.tableFontFamily,
+  (fontFamily) => {
+    applyDataGridFontFamily(fontFamily);
+  },
+  { immediate: true },
+);
+
+watch(
+  [() => settingsStore.isEditorSettingsLoaded, () => settingsStore.editorSettings.toolbarItems.exclusiveRightSidebarPanels],
+  ([loaded, exclusive]) => {
+    if (!loaded || !exclusive) return;
+    // Compatibility: old persisted panel flags may contain multiple open panels.
+    applyRightSidebarPanelState(enforceRightSidebarPanelExclusivity(currentRightSidebarPanelState(), lastOpenedRightSidebarPanel));
+  },
+  { immediate: true },
+);
+
+function currentRightSidebarPanelState(): RightSidebarPanelState {
+  return Object.fromEntries(RIGHT_SIDEBAR_PANEL_IDS.map((panelId) => [panelId, rightSidebarPanelRefs[panelId].value])) as RightSidebarPanelState;
 }
 
-function toggleSqlLibrary() {
-  showSqlLibraryPanel.value = !showSqlLibraryPanel.value;
-  safeLocalStorageSet("dbx-sql-library-open", String(showSqlLibraryPanel.value));
+function applyRightSidebarPanelState(next: RightSidebarPanelState) {
+  for (const panelId of RIGHT_SIDEBAR_PANEL_IDS) {
+    const panelRef = rightSidebarPanelRefs[panelId];
+    if (panelRef.value === next[panelId]) continue;
+    panelRef.value = next[panelId];
+    const storageKey = rightSidebarPanelStorageKeys[panelId];
+    if (storageKey) safeLocalStorageSet(storageKey, String(next[panelId]));
+  }
 }
 
-function toggleSqlFilePanel() {
-  showSqlFilePanel.value = !showSqlFilePanel.value;
-  safeLocalStorageSet("dbx-sql-file-panel-open", String(showSqlFilePanel.value));
+function setRightSidebarPanelOpen(panelId: RightSidebarPanelId, open: boolean) {
+  const exclusive = settingsStore.isEditorSettingsLoaded && settingsStore.editorSettings.toolbarItems.exclusiveRightSidebarPanels;
+  applyRightSidebarPanelState(transitionRightSidebarPanels(currentRightSidebarPanelState(), panelId, open, exclusive));
+  if (open) {
+    lastOpenedRightSidebarPanel = panelId;
+  } else if (lastOpenedRightSidebarPanel === panelId) {
+    lastOpenedRightSidebarPanel = RIGHT_SIDEBAR_PANEL_IDS.find((candidate) => rightSidebarPanelRefs[candidate].value);
+  }
+}
+
+function toggleRightSidebarPanel(panelId: RightSidebarPanelId) {
+  setRightSidebarPanelOpen(panelId, !rightSidebarPanelRefs[panelId].value);
+}
+
+function openRightSidebarPanel(panelId: RightSidebarPanelId) {
+  setRightSidebarPanelOpen(panelId, true);
+}
+
+function closeRightSidebarPanel(panelId: RightSidebarPanelId) {
+  setRightSidebarPanelOpen(panelId, false);
 }
 
 function invokeWhenAiReady(invoke: (handle: AiAssistantHandle) => void) {
@@ -580,26 +639,17 @@ function invokeWhenAiReady(invoke: (handle: AiAssistantHandle) => void) {
 }
 
 function fixWithAi(errorMessage: string) {
-  if (!showAiPanel.value) {
-    showAiPanel.value = true;
-    safeLocalStorageSet("dbx-ai-panel-open", "true");
-  }
+  openRightSidebarPanel("ai");
   invokeWhenAiReady((handle) => handle.triggerAction("fix", errorMessage));
 }
 
 function sendSelectionToAi(sql: string) {
-  if (!showAiPanel.value) {
-    showAiPanel.value = true;
-    safeLocalStorageSet("dbx-ai-panel-open", "true");
-  }
+  openRightSidebarPanel("ai");
   invokeWhenAiReady((handle) => handle.setPrompt(sql));
 }
 
 function openAiPanel() {
-  if (!showAiPanel.value) {
-    showAiPanel.value = true;
-    safeLocalStorageSet("dbx-ai-panel-open", "true");
-  }
+  openRightSidebarPanel("ai");
 }
 
 function analyzeHistoryWithAi(entry: HistoryEntry) {
@@ -628,6 +678,15 @@ function formatActiveSql() {
   if (!tab || tab.mode !== "query" || !tab.sql.trim()) return;
   formatSqlRequest.value = {
     id: (formatSqlRequest.value?.id ?? 0) + 1,
+    tabId: tab.id,
+  };
+}
+
+function compressActiveSql() {
+  const tab = activeTab.value;
+  if (!tab || tab.mode !== "query" || !tab.sql.trim()) return;
+  compressSqlRequest.value = {
+    id: (compressSqlRequest.value?.id ?? 0) + 1,
     tabId: tab.id,
   };
 }
@@ -1480,7 +1539,24 @@ function ensureQueryTab(): string {
   return queryStore.createTab(connId, db, undefined, "query");
 }
 
+function routeAiRedisCommand(command: string, execute: boolean): boolean {
+  if (activeConnection.value?.db_type !== "redis") return false;
+
+  // Redis has a dedicated console. Falling through to ensureQueryTab() would
+  // recreate the original bug by opening a SQL tab for a Redis command.
+  const routed = execute ? contentAreaRef.value?.executeRedisCommand(command) : contentAreaRef.value?.insertRedisCommand(command);
+  if (!routed) {
+    console.warn("[DBX] Redis AI command could not reach the active Redis console");
+    return true;
+  }
+  void routed.then((handled) => {
+    if (!handled) console.warn("[DBX] Redis AI command could not reach the active Redis console");
+  });
+  return true;
+}
+
 function onAiReplaceSql(sql: string) {
+  if (routeAiRedisCommand(sql, false)) return;
   const tabId = ensureQueryTab();
   queryStore.updateSql(tabId, sql);
 }
@@ -1491,17 +1567,20 @@ function runAiGeneratedSql(sql: string) {
 }
 
 function onAiExecuteSql(sql: string) {
+  if (routeAiRedisCommand(sql, true)) return;
   const tabId = ensureQueryTab();
   queryStore.updateSql(tabId, buildAppendedEditorSql(activeTab.value?.sql || "", sql));
   runAiGeneratedSql(sql);
 }
 
 function onAiTempRunSql(sql: string) {
+  if (routeAiRedisCommand(sql, true)) return;
   ensureQueryTab();
   runAiGeneratedSql(sql);
 }
 
 function onAiRequestAutoExecuteSql(sql: string) {
+  if (routeAiRedisCommand(sql, true)) return;
   const tabId = ensureQueryTab();
   queryStore.updateSql(tabId, buildAppendedEditorSql(activeTab.value?.sql || "", sql));
   selectedSql.value = "";
@@ -1653,7 +1732,7 @@ async function handleQuickOpenSelect(item: any) {
 
     const schema = item.schema || item.database;
     try {
-      const result = await api.getObjectSource(item.connectionId, item.database, schema, item.objectName || item.tableName, objectType);
+      const result = await api.getObjectSource(item.connectionId, item.database, schema, item.objectName || item.tableName, objectType, item.signature);
       const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${item.objectName || item.tableName}`);
       queryStore.updateSql(tabId, result.source);
       if (item.type !== "sequence" && item.type !== "trigger" && item.type !== "type" && item.type !== "type-body") {
@@ -1661,6 +1740,7 @@ async function handleQuickOpenSelect(item: any) {
           schema,
           name: item.objectName || item.tableName,
           objectType,
+          signature: item.signature,
         });
       }
       queryStore.markTabClean(queryStore.tabs.find((tab) => tab.id === tabId));
@@ -1850,6 +1930,8 @@ async function initApp() {
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
     await settingsStore.initDesktopSettings().catch(() => {});
 
+    void promptTemplateStore.init();
+
     void Promise.all([initSavedSqlEditorPositions(), savedSqlStore.initFromStorage()])
       .then(() => {
         console.log(`[STARTUP]   savedSqlStore.initFromStorage: ${(performance.now() - t0).toFixed(0)}ms`);
@@ -2034,10 +2116,10 @@ onUnmounted(() => {
           @new-connection="showConnectionDialog = true"
           @new-query="newQuery"
           @set-theme-mode="setThemeMode"
-          @toggle-ai="toggleAiPanel"
-          @toggle-history="showHistory = !showHistory"
-          @toggle-sql-library="toggleSqlLibrary"
-          @toggle-sql-file-panel="toggleSqlFilePanel"
+          @toggle-ai="toggleRightSidebarPanel('ai')"
+          @toggle-history="toggleRightSidebarPanel('history')"
+          @toggle-sql-library="toggleRightSidebarPanel('sqlLibrary')"
+          @toggle-sql-file-panel="toggleRightSidebarPanel('sqlFile')"
           @open-github="openGitHub"
           @open-settings="openSettings()"
           @open-driver-store="openDriverStorePage"
@@ -2118,6 +2200,7 @@ onUnmounted(() => {
                   @cancel="cancelActiveExecution()"
                   @explain="tryExplain()"
                   @format-sql="formatActiveSql"
+                  @compress-sql="compressActiveSql"
                   @toggle-sql-keyword-case="toggleSqlKeywordCase"
                   @save-sql="void openSaveSqlDialog()"
                   @open-sql="openSqlFile"
@@ -2138,6 +2221,7 @@ onUnmounted(() => {
                     :executable-sql="executableSql"
                     :active-output-view="activeOutputView"
                     :format-sql-request="formatSqlRequest"
+                    :compress-sql-request="compressSqlRequest"
                     :selected-sql="selectedSql"
                     :cursor-pos="cursorPos"
                     :block-dangerous-redis-commands="blockDangerousRedisCommands"
@@ -2209,7 +2293,7 @@ onUnmounted(() => {
                 @open-saved-sql="openSavedSqlFromWelcome"
                 @new-connection="showConnectionDialog = true"
                 @new-query="newQuery"
-                @show-history="showHistory = true"
+                @show-history="openRightSidebarPanel('history')"
                 @import-config="dialogs.onImportClick"
                 @open-github="openGitHub"
                 @open-mcp-guide="openMcpGuide"
@@ -2229,28 +2313,30 @@ onUnmounted(() => {
                 @execute-sql="onAiExecuteSql"
                 @temp-run-sql="onAiTempRunSql"
                 @request-auto-execute-sql="onAiRequestAutoExecuteSql"
+                @insert-redis-command="(command: string) => routeAiRedisCommand(command, false)"
+                @execute-redis-command="(command: string) => routeAiRedisCommand(command, true)"
                 @open-explain-plan="onAiOpenExplainPlan"
-                @close="toggleAiPanel"
+                @close="closeRightSidebarPanel('ai')"
               />
             </div>
           </div>
 
           <div v-if="showHistory" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: historyWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
-            <QueryHistory @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="showHistory = false" />
+            <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
           </div>
 
           <div v-if="showSqlLibraryPanel" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlLibraryWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlLibraryResize" />
             <div class="h-full min-h-0 overflow-hidden">
-              <SqlLibraryPanel @close="toggleSqlLibrary" />
+              <SqlLibraryPanel @close="closeRightSidebarPanel('sqlLibrary')" />
             </div>
           </div>
 
           <div v-if="showSqlFilePanel" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlFilePanelWidth + 'px' }">
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlFilePanelResize" />
             <div class="h-full min-h-0 overflow-hidden">
-              <SqlFilePanel @close="toggleSqlFilePanel" />
+              <SqlFilePanel @close="closeRightSidebarPanel('sqlFile')" />
             </div>
           </div>
         </div>

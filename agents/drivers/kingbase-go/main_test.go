@@ -19,6 +19,8 @@ var registerTestDriver sync.Once
 var testDriverState atomic.Pointer[fakeDriverState]
 var registerExpressionFallbackDriver sync.Once
 var expressionFallbackState atomic.Pointer[fallbackDriverState]
+var registerModeDetectionDriver sync.Once
+var modeDetectionState atomic.Pointer[modeDetectionDriverState]
 
 type fakeDriverState struct {
 	queryArgs int
@@ -44,6 +46,20 @@ type fallbackDriver struct{}
 
 type fallbackConn struct {
 	state *fallbackDriverState
+}
+
+type modeDetectionDriverState struct {
+	mu            sync.Mutex
+	queries       []string
+	databaseMode  *string
+	sqlModeExists bool
+	databaseErr   error
+}
+
+type modeDetectionDriver struct{}
+
+type modeDetectionConn struct {
+	state *modeDetectionDriverState
 }
 
 type valueRows struct {
@@ -101,6 +117,24 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 	if strings.Contains(query, "information_schema.table_constraints") {
 		return &valueRows{columns: []string{"column_name"}}, nil
 	}
+	if strings.Contains(query, "CASE c.relkind") && strings.Contains(query, "obj_description(c.oid)") {
+		return &valueRows{
+			columns: []string{"table_name", "table_type", "table_comment"},
+			rows:    [][]driver.Value{{"orders", "BASE TABLE", "orders table"}},
+		}, nil
+	}
+	if strings.Contains(query, "SELECT obj_description(c.oid)") {
+		return &valueRows{
+			columns: []string{"table_comment"},
+			rows:    [][]driver.Value{{"orders table"}},
+		}, nil
+	}
+	if strings.Contains(query, "FROM information_schema.columns c") {
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"id", "integer", "NO", nil, "primary key", int64(32), int64(0), nil}},
+		}, nil
+	}
 	if strings.Contains(query, "sys_get_expr(") {
 		return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function sys_get_expr(pg_node_tree, oid) does not exist"}
 	}
@@ -111,6 +145,42 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 		}, nil
 	}
 	return nil, errors.New("unexpected query: " + query)
+}
+
+func (modeDetectionDriver) Open(string) (driver.Conn, error) {
+	return &modeDetectionConn{state: modeDetectionState.Load()}, nil
+}
+
+func (*modeDetectionConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+
+func (*modeDetectionConn) Close() error { return nil }
+
+func (*modeDetectionConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+
+func (connection *modeDetectionConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	connection.state.mu.Lock()
+	connection.state.queries = append(connection.state.queries, query)
+	connection.state.mu.Unlock()
+
+	switch {
+	case strings.Contains(query, "LOWER(name) = 'database_mode'"):
+		if connection.state.databaseErr != nil {
+			return nil, connection.state.databaseErr
+		}
+		rows := [][]driver.Value{}
+		if connection.state.databaseMode != nil {
+			rows = append(rows, []driver.Value{*connection.state.databaseMode})
+		}
+		return &valueRows{columns: []string{"setting"}, rows: rows}, nil
+	case strings.Contains(query, "LOWER(name) = 'sql_mode'"):
+		rows := [][]driver.Value{}
+		if connection.state.sqlModeExists {
+			rows = append(rows, []driver.Value{int64(1)})
+		}
+		return &valueRows{columns: []string{"value"}, rows: rows}, nil
+	default:
+		return nil, errors.New("unexpected query: " + query)
+	}
 }
 
 func (rows *valueRows) Columns() []string { return rows.columns }
@@ -138,6 +208,19 @@ func openFakeDB(t *testing.T, rowCount int) (*sql.DB, *fakeDriverState) {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	return db, state
+}
+
+func openModeDetectionDB(t *testing.T, state *modeDetectionDriverState) *sql.DB {
+	t.Helper()
+	registerModeDetectionDriver.Do(func() { sql.Register("kingbase-mode-detection-test", modeDetectionDriver{}) })
+	modeDetectionState.Store(state)
+	db, err := sql.Open("kingbase-mode-detection-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 func TestHandshakeAdvertisesMultiSession(t *testing.T) {
@@ -263,9 +346,142 @@ func TestColumnsFallbackToPgGetExprAndCacheChoice(t *testing.T) {
 		if strings.Contains(query, "pg_get_expr(") {
 			pgCalls++
 		}
+		if (strings.Contains(query, "sys_get_expr(") || strings.Contains(query, "pg_get_expr(")) &&
+			!strings.Contains(query, "col_description(a.attrelid, a.attnum)") {
+			t.Fatalf("catalog columns must use PostgreSQL column comments: %s", query)
+		}
 	}
 	if sysCalls != 1 || pgCalls != 2 {
 		t.Fatalf("fallback choice was not cached: sys=%d pg=%d queries=%v", sysCalls, pgCalls, state.queries)
+	}
+}
+
+func TestMySQLCompatColumnsUsePostgresColumnComments(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	state := &fallbackDriverState{}
+	expressionFallbackState.Store(state)
+	db, err := sql.Open("kingbase-expression-fallback-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	server := newServer()
+	server.db = db
+	server.mode.mysqlCompat = true
+
+	columns, err := server.getColumns("public", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 1 || columns[0].Comment == nil || *columns[0].Comment != "primary key" {
+		t.Fatalf("unexpected columns: %#v", columns)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 2 || !strings.Contains(state.queries[1], "col_description(a.attrelid, a.attnum)") {
+		t.Fatalf("MySQL-compatible columns must use PostgreSQL column comments: %v", state.queries)
+	}
+}
+
+func TestAllCompatibilityModesUsePostgresTableComments(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	state := &fallbackDriverState{}
+	expressionFallbackState.Store(state)
+	db, err := sql.Open("kingbase-expression-fallback-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	server := newServer()
+	server.db = db
+	for _, mysqlCompat := range []bool{false, true} {
+		state.mu.Lock()
+		state.queries = nil
+		state.mu.Unlock()
+		server.mode.mysqlCompat = mysqlCompat
+
+		tables, err := server.listTables("public", metadataListConstraints{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tables) != 1 || tables[0].Comment == nil || *tables[0].Comment != "orders table" {
+			t.Fatalf("mysqlCompat=%v: unexpected tables: %#v", mysqlCompat, tables)
+		}
+
+		state.mu.Lock()
+		queries := append([]string(nil), state.queries...)
+		state.mu.Unlock()
+		if len(queries) != 1 || !strings.Contains(queries[0], "obj_description(c.oid)") ||
+			!strings.Contains(queries[0], "FROM sys_catalog.sys_class c") {
+			t.Fatalf("mysqlCompat=%v: table comments must share the PostgreSQL-compatible query: %v", mysqlCompat, queries)
+		}
+	}
+}
+
+func TestGetTableCommentUsesPostgresCatalogComment(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	state := &fallbackDriverState{}
+	expressionFallbackState.Store(state)
+	db, err := sql.Open("kingbase-expression-fallback-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	server := newServer()
+	server.db = db
+	server.mode.mysqlCompat = true
+
+	comment, err := server.getTableComment("public", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comment == nil || *comment != "orders table" {
+		t.Fatalf("unexpected table comment: %#v", comment)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 1 || !strings.Contains(state.queries[0], "FROM sys_catalog.sys_class c") ||
+		!strings.Contains(state.queries[0], "n.nspname = 'public'") || !strings.Contains(state.queries[0], "c.relname = 'orders'") {
+		t.Fatalf("table comment must use the PostgreSQL-compatible catalog query: %v", state.queries)
+	}
+}
+
+func TestDetectMySQLCompatModePrefersDatabaseModeOverSQLModePresence(t *testing.T) {
+	oracle := "oracle"
+	state := &modeDetectionDriverState{
+		databaseMode:  &oracle,
+		sqlModeExists: true,
+	}
+	db := openModeDetectionDB(t, state)
+
+	if detectMySQLCompatMode(db) {
+		t.Fatal("oracle-compatible server with sql_mode should not be treated as MySQL-compatible")
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 1 || !strings.Contains(state.queries[0], "database_mode") {
+		t.Fatalf("database_mode should be authoritative when present: %v", state.queries)
+	}
+}
+
+func TestDetectMySQLCompatModeFallsBackToSQLModeWhenDatabaseModeMissing(t *testing.T) {
+	state := &modeDetectionDriverState{sqlModeExists: true}
+	db := openModeDetectionDB(t, state)
+
+	if !detectMySQLCompatMode(db) {
+		t.Fatal("legacy server with sql_mode but no database_mode should still use MySQL compatibility")
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 2 {
+		t.Fatalf("expected database_mode probe followed by sql_mode fallback, got: %v", state.queries)
 	}
 }
 

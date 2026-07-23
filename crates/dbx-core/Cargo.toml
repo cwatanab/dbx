@@ -42,6 +42,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
 json5 = "0.4"
 regex = "1"
+winnow = "1.0"
 rayon = "1"
 percent-encoding = "2"
 encoding_rs = "0.8"
@@ -87,3 +88,4 @@ bytes = "1"
 font-kit = "0.14.3"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 sysinfo = { version = "0.32", features = ["system"] }
+tempfile = "3"

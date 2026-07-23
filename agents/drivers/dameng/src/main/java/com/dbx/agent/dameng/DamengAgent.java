@@ -72,11 +72,6 @@ public final class DamengAgent extends BaseDatabaseAgent {
               ON schema_object.OBJECT_ID = m.SCHID AND schema_object.OBJECT_TYPE = 'SCH'
         ) mv ON mv.OWNER = o.OWNER AND mv.MVIEW_NAME = o.OBJECT_NAME
         """.stripIndent().trim();
-    private static final Set<String> SYSTEM_USERS = Set.of(
-        "SYS", "SYSAUDITOR", "SYSSSO", "CTISYS",
-        "SYSDBA", "SYS_DBA", "_SYS_STATISTICS", "SYS_PHM"
-    );
-
     private Connection connection;
     private String connectedUsername;
 
@@ -157,13 +152,8 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     private List<String> listVisibleUsers() throws Exception {
         List<String> result = new ArrayList<>();
-        String placeholders = String.join(",", SYSTEM_USERS.stream().map(user -> "?").toList());
-        String sql = "SELECT USERNAME FROM ALL_USERS WHERE USERNAME NOT IN (" + placeholders + ") ORDER BY USERNAME";
+        String sql = "SELECT USERNAME FROM ALL_USERS ORDER BY USERNAME";
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-            int index = 1;
-            for (String user : SYSTEM_USERS) {
-                stmt.setString(index++, user);
-            }
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(rs.getString(1));
@@ -175,13 +165,8 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     private List<String> listVisibleSchemas() throws Exception {
         List<String> result = new ArrayList<>();
-        String placeholders = String.join(",", SYSTEM_USERS.stream().map(user -> "?").toList());
-        String sql = "SELECT NAME FROM SYS.SYSOBJECTS WHERE TYPE$ = 'SCH' AND NAME NOT IN (" + placeholders + ") ORDER BY NAME";
+        String sql = "SELECT NAME FROM SYS.SYSOBJECTS WHERE TYPE$ = 'SCH' ORDER BY NAME";
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
-            int index = 1;
-            for (String user : SYSTEM_USERS) {
-                stmt.setString(index++, user);
-            }
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(rs.getString(1));
@@ -635,13 +620,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         return unchecked(() -> {
-            String dbmsType = switch (objectType.toUpperCase(Locale.ROOT)) {
-                case "VIEW" -> "VIEW";
-                case "MATERIALIZED_VIEW", "MATERIALIZED VIEW" -> "MATERIALIZED_VIEW";
-                case "PROCEDURE" -> "PROCEDURE";
-                case "FUNCTION" -> "FUNCTION";
-                default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
-            };
+            String dbmsType = damengDdlObjectType(objectType);
             String source;
             String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
@@ -654,6 +633,18 @@ public final class DamengAgent extends BaseDatabaseAgent {
             }
             return new ObjectSource(name, objectType, schema, source);
         });
+    }
+
+    static String damengDdlObjectType(String objectType) {
+        return switch (objectType.toUpperCase(Locale.ROOT)) {
+            case "VIEW" -> "VIEW";
+            case "MATERIALIZED_VIEW", "MATERIALIZED VIEW" -> "MATERIALIZED_VIEW";
+            case "PROCEDURE" -> "PROCEDURE";
+            case "FUNCTION" -> "FUNCTION";
+            // DM DBMS_METADATA accepts TRIGGER directly and returns executable CREATE OR REPLACE DDL.
+            case "TRIGGER" -> "TRIGGER";
+            default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
+        };
     }
 
     @Override

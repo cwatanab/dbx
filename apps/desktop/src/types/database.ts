@@ -248,6 +248,8 @@ export interface ProxyTunnelConfig {
   port: number;
   username?: string;
   password?: string;
+  /** Optional target host:port for tunnel testing. When empty, self-connect. */
+  test_target?: string;
   /** See {@link SshTunnelConfig.profile_id}. */
   profile_id?: string;
 }
@@ -347,6 +349,11 @@ export interface JdbcPluginStatus {
 
 export interface DatabaseInfo {
   name: string;
+}
+
+export interface DatabaseStorageInfo {
+  name: string;
+  size_bytes: number | null;
 }
 
 export interface SchemaInfo {
@@ -500,6 +507,8 @@ export interface OwnerInfo {
 
 export interface QueryResult {
   columns: string[];
+  /** Internal marker for a result built by appending a page to existing rows. */
+  appended_from_row_count?: number;
   /** Set for synthesized query execution failures. */
   execution_error?: true;
   /** Zero-based index of the submitted statement that produced this result. */
@@ -585,6 +594,7 @@ export interface SqlTextSpan {
 
 export interface SqlTableReference {
   name: string;
+  database?: string | null;
   schema?: string | null;
   alias?: string | null;
   span: SqlTextSpan;
@@ -709,6 +719,7 @@ export interface TreeNode {
   tableType?: string;
   comment?: string | null;
   valid?: boolean | null;
+  sizeBytes?: number | null;
   objectCount?: number;
   loadedKeyCount?: number;
   totalKeyCount?: number;
@@ -718,7 +729,7 @@ export interface TreeNode {
   tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ExtensionInfo | VectorCollectionMeta;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta;
   loadMore?: {
     parentId: string;
     offset: number;
@@ -827,6 +838,8 @@ export interface QueryTab {
   explainExecutionId?: string;
   /** Per-run connection session for explain flows that require session state. */
   explainClientSessionId?: string;
+  /** Invalidates tab-scoped completion metadata after session context changes. */
+  completionContextVersion?: number;
   mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist" | "mysql-dashboard" | "postgres-dashboard";
   mqTenant?: string;
   mqInitialTab?: "topics";
@@ -847,6 +860,7 @@ export interface QueryTab {
     schema?: string;
     name: string;
     objectType: ObjectSourceKind;
+    signature?: string;
   };
   tableMeta?: {
     schema?: string;
@@ -954,10 +968,17 @@ export interface VectorCollectionMeta {
   collectionId?: string;
 }
 
+/** Mongo collection node metadata (not SQL tableType). */
+export type MongoCollectionKind = "collection" | "view" | "timeseries";
+
+export interface MongoCollectionMeta {
+  collectionKind: MongoCollectionKind;
+}
+
 export interface CollectionInfo {
   name: string;
   id: string;
   dimension?: number;
-  kind?: "collection" | "bucket";
+  kind?: MongoCollectionKind | "bucket";
   bucketName?: string;
 }

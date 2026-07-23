@@ -19,6 +19,7 @@ import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import QueryErrorActions from "@/components/common/QueryErrorActions.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
+import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
 import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
 let dataGridComponentPromise: Promise<typeof import("@/components/grid/DataGrid.vue")> | undefined;
 function loadDataGridComponent() {
@@ -119,6 +120,8 @@ type DataGridHandle = {
 type SearchableBrowserHandle = {
   focusSearch: () => boolean;
   refresh?: () => boolean;
+  insertCommand?: (command: string) => Promise<boolean>;
+  executeCommand?: (command: string) => Promise<boolean>;
 };
 
 const props = defineProps<{
@@ -127,6 +130,7 @@ const props = defineProps<{
   executableSql: string;
   activeOutputView: "result" | "summary" | "explain" | "chart";
   formatSqlRequest: { id: number; tabId: string } | null;
+  compressSqlRequest: { id: number; tabId: string } | null;
   selectedSql: string;
   cursorPos: number;
   blockDangerousRedisCommands: boolean;
@@ -788,7 +792,17 @@ function applyTableStructureChanges() {
   return tableStructureEditorRef.value?.applyChanges() ?? Promise.resolve(false);
 }
 
-defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, handleModRTarget, requestQueryEditorExecute, pasteClipboardAsSqlInCondition, applyTableStructureChanges });
+async function insertRedisCommand(command: string): Promise<boolean> {
+  if (props.activeTab.mode !== "redis") return false;
+  return (await redisKeyBrowserRef.value?.insertCommand?.(command)) ?? false;
+}
+
+async function executeRedisCommand(command: string): Promise<boolean> {
+  if (props.activeTab.mode !== "redis") return false;
+  return (await redisKeyBrowserRef.value?.executeCommand?.(command)) ?? false;
+}
+
+defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, handleModRTarget, requestQueryEditorExecute, pasteClipboardAsSqlInCondition, applyTableStructureChanges, insertRedisCommand, executeRedisCommand });
 </script>
 
 <template>
@@ -814,11 +828,14 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               :connection-id="activeTab.connectionId"
               :database="activeTab.database"
               :schema="activeTab.schema"
+              :client-session-id="activeTab.id"
+              :completion-context-version="activeTab.completionContextVersion"
               :database-type="activeEffectiveDatabaseType"
               :dialect="editorDialect"
               :syntax-dialect="editorSyntaxDialect"
               :format-dialect="activeSqlFormatDialect"
               :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
+              :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
               :execution-error="activeQueryError"
               :execution-error-sql="activeTab.lastExecutedSql"
               :statement-execution-markers="activeStatementExecutionMarkers"
@@ -961,6 +978,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                         </button>
                       </div>
                     </div>
+                    <DataGridFontFamilyControl />
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                       <div class="min-w-0 flex items-center gap-2 font-medium">
                         <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[11px] font-semibold text-muted-foreground">A</span>
@@ -1373,6 +1391,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                   </button>
                 </div>
               </div>
+              <DataGridFontFamilyControl />
               <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                 <div class="min-w-0 flex items-center gap-2 font-medium">
                   <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[11px] font-semibold text-muted-foreground">A</span>
