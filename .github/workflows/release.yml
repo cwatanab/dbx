@@ -186,13 +186,14 @@ jobs:
           $exePath = "target/${{ matrix.target }}/release/dbx.exe"
           $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
+          $cleanVersion = $version -replace '-.*$', ''
 
           if (!(Test-Path $exePath)) {
             Write-Error "Missing Windows executable: $exePath"
             exit 1
           }
-          if (!$appVersion -or $appVersion -ne $version) {
-            Write-Error "Release tag version $version does not match the built DBX package version $appVersion"
+          if (!$appVersion -or $appVersion -ne $cleanVersion) {
+            Write-Error "Release tag version $cleanVersion does not match the built DBX package version $appVersion"
             exit 1
           }
 
