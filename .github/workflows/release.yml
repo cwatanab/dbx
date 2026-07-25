@@ -232,36 +232,36 @@ jobs:
 
 
 
-  cleanup-release-signatures:
+  cleanup-non-portable-assets:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Remove standalone updater signature assets
+      - name: Remove non-portable release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          mapfile -t SIG_ASSETS < <(
+          mapfile -t NON_PORTABLE_ASSETS < <(
             gh release view "${GITHUB_REF_NAME}" \
               --repo "${GITHUB_REPOSITORY}" \
               --json assets \
-              --jq '.assets[].name | select(endswith(".sig") and (endswith("-portable.zip.sig") | not))'
+              --jq '.assets[].name | select(contains("-portable.zip") | not)'
           )
 
-          if [ "${#SIG_ASSETS[@]}" -eq 0 ]; then
-            echo "No standalone .sig release assets found."
+          if [ "${#NON_PORTABLE_ASSETS[@]}" -eq 0 ]; then
+            echo "No non-portable release assets found."
             exit 0
           fi
 
-          for ASSET in "${SIG_ASSETS[@]}"; do
-            echo "Deleting release asset: ${ASSET}"
+          for ASSET in "${NON_PORTABLE_ASSETS[@]}"; do
+            echo "Deleting non-portable release asset: ${ASSET}"
             gh release delete-asset "${GITHUB_REF_NAME}" "${ASSET}" \
               --repo "${GITHUB_REPOSITORY}" \
               --yes
           done
 
   publish:
-    needs: [cleanup-release-signatures]
+    needs: [cleanup-non-portable-assets]
     runs-on: ubuntu-latest
     steps:
       - name: Publish draft release
