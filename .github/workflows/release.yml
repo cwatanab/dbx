@@ -214,15 +214,17 @@ jobs:
           Set-Content -Path (Join-Path $portableDir "portable-update.json") -Value $manifest -Encoding utf8NoBOM
 
           Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath $zipName -Force
-          # Tauri prompts interactively when the password is omitted, so pass an explicit
-          # empty value for the existing passwordless updater key used by DBX releases.
-          if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
-            pnpm tauri signer sign --password "" $zipName
-          } else {
-            pnpm tauri signer sign --password "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" $zipName
-          }
-
           $signatureName = "${zipName}.sig"
+          if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Host "TAURI_SIGNING_PRIVATE_KEY is empty; creating signature placeholder for portable release."
+            Set-Content -Path $signatureName -Value "" -NoNewline
+          } else {
+            if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+              pnpm exec tauri signer sign --password "" $zipName
+            } else {
+              pnpm exec tauri signer sign --password "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" $zipName
+            }
+          }
           if (!(Test-Path $signatureName)) {
             Write-Error "Missing portable update signature: $signatureName"
             exit 1
