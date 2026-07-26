@@ -18,7 +18,7 @@ concurrency:
 jobs:
   sync-cnb:
     name: Sync to CNB
-    if: github.repository == 't8y2/dbx' && secrets.CNB_TOKEN != ''
+    if: github.repository == 't8y2/dbx'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -40,7 +40,7 @@ jobs:
 
   sync-atomgit:
     name: Sync to AtomGit
-    if: github.repository == 't8y2/dbx' && secrets.ATOMGIT_TOKEN != ''
+    if: github.repository == 't8y2/dbx'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -62,7 +62,7 @@ jobs:
 
   sync-gitee:
     name: Sync to Gitee
-    if: github.repository == 't8y2/dbx' && secrets.GITEE_TOKEN != ''
+    if: github.repository == 't8y2/dbx'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
