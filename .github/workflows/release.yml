@@ -217,9 +217,9 @@ jobs:
           # Tauri prompts interactively when the password is omitted, so pass an explicit
           # empty value for the existing passwordless updater key used by DBX releases.
           if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
-            pnpm tauri signer sign "--password=" $zipName
+            pnpm tauri signer sign --password "" $zipName
           } else {
-            pnpm tauri signer sign $zipName
+            pnpm tauri signer sign --password "$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD" $zipName
           }
 
           $signatureName = "${zipName}.sig"
