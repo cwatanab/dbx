@@ -5,6 +5,9 @@ use crate::types::{
     TriggerInfo,
 };
 use futures::{FutureExt, TryStreamExt};
+use sqlparser::ast::{Expr, SelectItem, SetExpr, Statement};
+use sqlparser::dialect::MsSqlDialect;
+use sqlparser::parser::Parser;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
@@ -44,7 +47,7 @@ const SQLSERVER_RESULT_TYPE_PROBE_SQL: &str = "\
         DECLARE @dbx_probe_sql nvarchar(max); \
         BEGIN TRY \
             SET @dbx_probe_sql = N'SELECT TOP (0) * INTO ' + QUOTENAME(@dbx_probe_table) + \
-                N' FROM (' + @P3 + N') AS dbx_probe_source'; \
+                N' FROM ' + @P3; \
             EXEC sys.sp_executesql @dbx_probe_sql; \
             SELECT c.name, TYPE_NAME(c.system_type_id) AS system_type_name, \
                    SCHEMA_NAME(t.schema_id) AS user_type_schema, t.name AS user_type_name \
@@ -347,6 +350,7 @@ fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         },
         messages,
     ))
@@ -391,6 +395,7 @@ async fn collect_first_result_limited(
         truncated,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     })
 }
 
@@ -419,6 +424,12 @@ struct SqlServerDescribedColumn {
     user_type_name: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct SqlServerLegacyProbe {
+    source_sql: String,
+    output_names: Option<Vec<Option<String>>>,
+}
+
 async fn sqlserver_driver_result<T, E, F>(future: F) -> Result<T, String>
 where
     F: Future<Output = Result<T, E>>,
@@ -440,23 +451,24 @@ pub fn is_driver_panic_error(error: &str) -> bool {
 async fn describe_sqlserver_result_set(
     client: &mut SqlServerClient,
     sql: &str,
-    legacy_sql: &str,
+    legacy_probe: &SqlServerLegacyProbe,
 ) -> Result<Vec<SqlServerDescribedColumn>, String> {
-    describe_sqlserver_result_set_with_mode(client, sql, legacy_sql, false).await
+    describe_sqlserver_result_set_with_mode(client, sql, legacy_probe, false).await
 }
 
 async fn describe_sqlserver_result_set_with_mode(
     client: &mut SqlServerClient,
     sql: &str,
-    legacy_sql: &str,
+    legacy_probe: &SqlServerLegacyProbe,
     force_legacy: bool,
 ) -> Result<Vec<SqlServerDescribedColumn>, String> {
     // SQL Server 2008 has no first-result-set DMV. Keep one probe round trip by
     // selecting the modern DMV path server-side and using metadata-only execution otherwise.
     let force_legacy = i32::from(force_legacy);
-    let mut stream =
-        sqlserver_driver_result(client.query(SQLSERVER_RESULT_TYPE_PROBE_SQL, &[&sql, &force_legacy, &legacy_sql]))
-            .await?;
+    let mut stream = sqlserver_driver_result(
+        client.query(SQLSERVER_RESULT_TYPE_PROBE_SQL, &[&sql, &force_legacy, &legacy_probe.source_sql]),
+    )
+    .await?;
     let mut active_result_index = None;
     let mut uses_describe_dmv = None;
     let mut rows = Vec::new();
@@ -486,7 +498,15 @@ async fn describe_sqlserver_result_set_with_mode(
     if uses_describe_dmv.is_none() {
         return Err("SQL Server result type probe did not report its compatibility mode".to_string());
     }
-    Ok(rows.iter().map(sqlserver_described_column_from_row).collect())
+    let mut columns = rows.iter().map(sqlserver_described_column_from_row).collect::<Vec<_>>();
+    if uses_describe_dmv == Some(false) {
+        if let Some(output_names) = &legacy_probe.output_names {
+            for (column, output_name) in columns.iter_mut().zip(output_names) {
+                column.name.clone_from(output_name);
+            }
+        }
+    }
+    Ok(columns)
 }
 
 fn sqlserver_described_column_from_row(row: &Row) -> SqlServerDescribedColumn {
@@ -506,11 +526,53 @@ async fn sqlserver_unsafe_type_query(client: &mut SqlServerClient, sql: &str) ->
     if !is_single_sqlserver_select(sql) {
         return Ok(None);
     }
-    let Some(legacy_sql) = normalized_sqlserver_select_statement(sql) else {
+    let Some(legacy_probe) = sqlserver_legacy_probe(sql) else {
         return Ok(None);
     };
-    let columns = describe_sqlserver_result_set(client, sql, &legacy_sql).await?;
+    let columns = describe_sqlserver_result_set(client, sql, &legacy_probe).await?;
     Ok(build_sqlserver_unsafe_type_query(sql, &columns))
+}
+
+fn sqlserver_legacy_probe(sql: &str) -> Option<SqlServerLegacyProbe> {
+    let statement = normalized_sqlserver_select_statement(sql)?;
+    let output_names = sqlserver_projection_output_names(&statement);
+    let source_alias = quote_sqlserver_identifier("dbx_probe_source");
+    let source_sql = if let Some(names) = &output_names {
+        let aliases = (0..names.len())
+            .map(sqlserver_source_column_name)
+            .map(|name| quote_sqlserver_identifier(&name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("({statement}) AS {source_alias}({aliases})")
+    } else {
+        format!("({statement}) AS {source_alias}")
+    };
+    Some(SqlServerLegacyProbe { source_sql, output_names })
+}
+
+fn sqlserver_projection_output_names(statement: &str) -> Option<Vec<Option<String>>> {
+    let statements = Parser::parse_sql(&MsSqlDialect {}, statement).ok()?;
+    let [Statement::Query(query)] = statements.as_slice() else {
+        return None;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    select
+        .projection
+        .iter()
+        .map(|item| match item {
+            SelectItem::ExprWithAlias { alias, .. } => Some(Some(alias.value.clone())),
+            SelectItem::UnnamedExpr(Expr::Identifier(identifier)) => {
+                Some((!identifier.value.starts_with('@')).then(|| identifier.value.clone()))
+            }
+            SelectItem::UnnamedExpr(Expr::CompoundIdentifier(identifiers)) => {
+                Some(identifiers.last().map(|identifier| identifier.value.clone()))
+            }
+            SelectItem::UnnamedExpr(_) => Some(None),
+            SelectItem::ExprWithAliases { .. } | SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_) => None,
+        })
+        .collect()
 }
 
 fn build_sqlserver_unsafe_type_query(sql: &str, columns: &[SqlServerDescribedColumn]) -> Option<String> {
@@ -776,6 +838,7 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
             truncated: result.truncated,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 }
@@ -1772,8 +1835,14 @@ fn sqlserver_columns_sql(schema: &str, table: &str) -> String {
 
 pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let sql = sqlserver_indexes_sql(schema, table);
-    let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
-    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    let rows = match sqlserver_index_rows(client, &sql).await {
+        Ok(rows) => rows,
+        Err(error) if sqlserver_filter_definition_missing(&error) => {
+            let legacy_sql = sqlserver_legacy_indexes_sql(schema, table);
+            sqlserver_index_rows(client, &legacy_sql).await.map_err(|error| error.to_string())?
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     Ok(rows
         .iter()
         .map(|row| {
@@ -1797,7 +1866,32 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
         .collect())
 }
 
+async fn sqlserver_index_rows(client: &mut SqlServerClient, sql: &str) -> Result<Vec<Row>, tiberius::error::Error> {
+    client.query(sql, &[]).await?.into_first_result().await
+}
+
+fn sqlserver_filter_definition_missing(error: &tiberius::error::Error) -> bool {
+    sqlserver_filter_definition_error(error.code(), &error.to_string())
+}
+
+fn sqlserver_filter_definition_error(code: Option<u32>, message: &str) -> bool {
+    code == Some(207) && message.to_ascii_lowercase().contains("filter_definition")
+}
+
 fn sqlserver_indexes_sql(schema: &str, table: &str) -> String {
+    sqlserver_indexes_sql_with_filter_definition(schema, table, true)
+}
+
+fn sqlserver_legacy_indexes_sql(schema: &str, table: &str) -> String {
+    sqlserver_indexes_sql_with_filter_definition(schema, table, false)
+}
+
+fn sqlserver_indexes_sql_with_filter_definition(schema: &str, table: &str, include_filter_definition: bool) -> String {
+    let filter_definition = if include_filter_definition {
+        "i.filter_definition"
+    } else {
+        "CAST(NULL AS NVARCHAR(MAX)) AS filter_definition"
+    };
     format!(
         "SELECT i.name, \
          STUFF((SELECT ',' + c2.name \
@@ -1813,7 +1907,7 @@ fn sqlserver_indexes_sql(schema: &str, table: &str) -> String {
                 WHERE ic3.object_id = i.object_id AND ic3.index_id = i.index_id AND ic3.is_included_column = 1 \
                 ORDER BY ic3.index_column_id \
                 FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, '') AS included_cols, \
-         i.filter_definition, \
+         {filter_definition}, \
          ep.value AS index_comment \
          FROM sys.indexes i \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep WHERE ep.major_id = i.object_id AND ep.minor_id = i.index_id AND ep.name = N'MS_Description' AND ep.class = 7) ep \
@@ -1951,6 +2045,7 @@ pub async fn execute_query_with_max_rows(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             },
             messages,
         ))
@@ -1968,6 +2063,7 @@ pub async fn execute_query_with_max_rows(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             },
             messages,
         ))
@@ -1998,6 +2094,7 @@ pub async fn execute_batch_with_max_rows(
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             },
             messages,
         )]);
@@ -2058,6 +2155,7 @@ pub async fn execute_simple_batch_with_max_rows(
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         });
     }
 
@@ -2231,11 +2329,11 @@ mod tests {
         is_blocking_sqlserver_unsafe_probe_error, is_sqlserver_spatial_column, is_sqlserver_variant_column,
         query_result_with_server_messages, requires_simple_query_batch, sqlserver_batch_can_use_execute,
         sqlserver_cell_to_json, sqlserver_columns_sql, sqlserver_completion_assistant_sql,
-        sqlserver_dml_output_returns_rows, sqlserver_hidden_schema_names, sqlserver_indexes_sql,
-        sqlserver_list_objects_sql, sqlserver_list_schemas_sql, sqlserver_list_tables_sql,
-        sqlserver_schema_name_predicate, sqlserver_table_comment_sql, sqlserver_visible_object_predicate,
-        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerResultSet,
-        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_dml_output_returns_rows, sqlserver_filter_definition_error, sqlserver_hidden_schema_names,
+        sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_list_objects_sql,
+        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_schema_name_predicate,
+        sqlserver_table_comment_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
+        SqlServerDescribedColumn, SqlServerResultSet, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -2267,6 +2365,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
         let result = query_result_with_server_messages(empty, vec!["DBCC execution completed".to_string()]);
         assert_eq!(result.columns, vec!["Message"]);
@@ -2282,6 +2381,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
         let result = query_result_with_server_messages(select, vec!["informational".to_string()]);
         assert_eq!(result.columns, vec!["id"]);
@@ -2565,6 +2665,35 @@ mod tests {
         assert!(sql.contains("sys.extended_properties ep"));
         assert!(sql.contains("ep.minor_id = i.index_id"));
         assert!(sql.contains("MS_Description"));
+    }
+
+    #[test]
+    fn sqlserver_legacy_indexes_sql_omits_filtered_index_metadata() {
+        let sql = sqlserver_legacy_indexes_sql("dbo", "orders");
+
+        assert!(!sql.contains("i.filter_definition"));
+        assert!(sql.contains("CAST(NULL AS NVARCHAR(MAX)) AS filter_definition"));
+        assert!(sql.contains("ep.value AS index_comment"));
+    }
+
+    #[test]
+    fn sqlserver_filter_definition_fallback_requires_column_error_207() {
+        assert!(sqlserver_filter_definition_error(
+            Some(207),
+            "Token error: Column name 'filter_definition' is invalid. (code: 207)"
+        ));
+        assert!(sqlserver_filter_definition_error(
+            Some(207),
+            "Token error: 列名 'filter_definition' 无效。 (code: 207)"
+        ));
+        assert!(!sqlserver_filter_definition_error(
+            Some(207),
+            "Token error: Column name 'other_column' is invalid. (code: 207)"
+        ));
+        assert!(!sqlserver_filter_definition_error(
+            Some(229),
+            "Token error: SELECT permission denied for filter_definition. (code: 229)"
+        ));
     }
 
     #[test]
@@ -2956,6 +3085,7 @@ mod tests {
             truncated: false,
             session_id: None,
             has_more: false,
+            elasticsearch_raw_body: None,
         };
 
         strip_dbx_sqlserver_row_number_column(&mut result, sql);
@@ -3116,9 +3246,38 @@ mod tests {
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("sys.dm_exec_describe_first_result_set"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("##dbx_result_type_probe_"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("SELECT TOP (0) * INTO"));
+        assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("N' FROM ' + @P3"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("FROM tempdb.sys.columns"));
         assert!(!SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("FMTONLY"));
         assert_eq!(SQLSERVER_RESULT_TYPE_PROBE_SQL.matches("SELECT @dbx_use_describe_dmv").count(), 1);
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_uses_unique_internal_names_for_duplicate_outputs() {
+        let probe = sqlserver_legacy_probe(
+            "SELECT a.HJRQ, b.HJRQ, a.id + b.id AS total, GETDATE() FROM dbo.a a JOIN dbo.b b ON b.id = a.id",
+        )
+        .unwrap();
+
+        assert_eq!(
+            probe.source_sql,
+            "(SELECT a.HJRQ, b.HJRQ, a.id + b.id AS total, GETDATE() FROM dbo.a a JOIN dbo.b b ON b.id = a.id) AS [dbx_probe_source]([dbx_col_1], [dbx_col_2], [dbx_col_3], [dbx_col_4])"
+        );
+        assert_eq!(
+            probe.output_names,
+            Some(vec![Some("HJRQ".to_string()), Some("HJRQ".to_string()), Some("total".to_string()), None])
+        );
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_keeps_wildcards_on_existing_server_validation_path() {
+        let probe = sqlserver_legacy_probe("SELECT a.*, b.HJRQ FROM dbo.a a JOIN dbo.b b ON b.id = a.id").unwrap();
+
+        assert_eq!(
+            probe.source_sql,
+            "(SELECT a.*, b.HJRQ FROM dbo.a a JOIN dbo.b b ON b.id = a.id) AS [dbx_probe_source]"
+        );
+        assert_eq!(probe.output_names, None);
     }
 
     #[test]
@@ -3228,17 +3387,16 @@ mod tests {
         client.simple_query(setup).await.unwrap().into_results().await.unwrap();
 
         let sql = "SELECT id, payload FROM #dbx_issue_4002";
-        let ordinary_columns = super::describe_sqlserver_result_set_with_mode(
-            &mut client,
-            "SELECT 42 AS answer",
-            "SELECT 42 AS answer",
-            true,
-        )
-        .await
-        .unwrap();
+        let ordinary_probe = super::sqlserver_legacy_probe("SELECT 42 AS answer").unwrap();
+        let ordinary_columns =
+            super::describe_sqlserver_result_set_with_mode(&mut client, "SELECT 42 AS answer", &ordinary_probe, true)
+                .await
+                .unwrap();
         assert_eq!(ordinary_columns[0].system_type_name.as_deref(), Some("int"));
 
-        let legacy_columns = super::describe_sqlserver_result_set_with_mode(&mut client, sql, sql, true).await.unwrap();
+        let legacy_probe = super::sqlserver_legacy_probe(sql).unwrap();
+        let legacy_columns =
+            super::describe_sqlserver_result_set_with_mode(&mut client, sql, &legacy_probe, true).await.unwrap();
         assert_eq!(legacy_columns.len(), 2);
         assert!(is_sqlserver_variant_column(&legacy_columns[1]));
 
@@ -3252,15 +3410,23 @@ mod tests {
         let variant = super::execute_query(&mut client, sql).await.unwrap();
         assert_eq!(variant.rows, vec![vec![serde_json::json!(1), serde_json::json!("legacy")]]);
 
-        let boundary_error = super::describe_sqlserver_result_set_with_mode(
-            &mut client,
-            "SELECT 1 AS duplicate_name, 2 AS duplicate_name",
-            "SELECT 1 AS duplicate_name, 2 AS duplicate_name",
-            true,
-        )
-        .await
-        .unwrap_err();
-        assert!(is_blocking_sqlserver_unsafe_probe_error(&boundary_error));
+        let duplicate_sql = "SELECT id AS HJRQ, payload AS HJRQ FROM #dbx_issue_4002";
+        let duplicate_probe = super::sqlserver_legacy_probe(duplicate_sql).unwrap();
+        let duplicate_columns =
+            super::describe_sqlserver_result_set_with_mode(&mut client, duplicate_sql, &duplicate_probe, true)
+                .await
+                .unwrap();
+        assert_eq!(duplicate_columns.len(), 2);
+        assert_eq!(duplicate_columns[0].name.as_deref(), Some("HJRQ"));
+        assert_eq!(duplicate_columns[1].name.as_deref(), Some("HJRQ"));
+        assert!(is_sqlserver_variant_column(&duplicate_columns[1]));
+
+        let duplicate_rewritten = build_sqlserver_unsafe_type_query(duplicate_sql, &duplicate_columns).unwrap();
+        let duplicate_rows = client.query(duplicate_rewritten, &[]).await.unwrap().into_first_result().await.unwrap();
+        assert_eq!(duplicate_rows[0].columns()[0].name(), "HJRQ");
+        assert_eq!(duplicate_rows[0].columns()[1].name(), "HJRQ");
+        assert_eq!(duplicate_rows[0].get::<i32, _>(0), Some(1));
+        assert_eq!(duplicate_rows[0].get::<&str, _>(1), Some("legacy"));
 
         let continued = super::execute_query(&mut client, "SELECT CAST(7 AS int) AS still_connected").await.unwrap();
         assert_eq!(continued.rows, vec![vec![serde_json::json!(7)]]);

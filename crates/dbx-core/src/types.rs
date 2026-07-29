@@ -245,6 +245,11 @@ pub struct QueryResult {
     pub session_id: Option<String>,
     #[serde(default)]
     pub has_more: bool,
+    /// For Elasticsearch REST search results parsed into a table from _source,
+    /// this carries the raw HTTP response body so the UI can offer a toggle
+    /// between the tabular view and the original JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elasticsearch_raw_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +285,59 @@ pub struct TriggerInfo {
     pub timing: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintInfo {
+    pub name: String,
+    pub constraint_type: String,
+    pub definition: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_table: Option<String>,
+    #[serde(default)]
+    pub ref_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
+    #[serde(default)]
+    pub deferrable: bool,
+    #[serde(default)]
+    pub initially_deferred: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionInfo {
+    pub name: String,
+    pub position: i32,
+    pub value: String,
+    pub partition_type: String,
+    pub partition_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_partition_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_partition_span: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubpartitionInfo {
+    pub name: String,
+    pub position: i32,
+    pub value: String,
+    pub partition_type: String,
+    pub partition_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

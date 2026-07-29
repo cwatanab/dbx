@@ -18,10 +18,6 @@ export interface GitHubReleaseAsset {
   browser_download_url: string;
 }
 
-interface GitHubRelease {
-  assets?: GitHubReleaseAsset[];
-}
-
 interface AgentRegistryArtifact {
   url: string;
   size: number;
@@ -33,7 +29,7 @@ interface AgentRegistryDriver {
   native?: Record<string, AgentRegistryArtifact>;
 }
 
-interface AgentRegistry {
+export interface AgentRegistry {
   jres?: Record<string, { platforms?: Record<string, AgentRegistryArtifact> }>;
   drivers?: Record<string, AgentRegistryDriver>;
 }
@@ -87,8 +83,6 @@ export interface AgentDownloadCatalog {
   nativeAgents: NativeAgentDisplayEntry[];
 }
 
-const AGENTS_LATEST_RELEASE_API_URL = "https://api.github.com/repos/t8y2/dbx/releases/tags/agents-latest";
-const CNB_AGENT_REGISTRY_URL = "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json";
 const JDBC_PLUGIN_DOWNLOAD_URL = "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip";
 const GITHUB_RELEASE_DOWNLOAD_PREFIX = "https://github.com/t8y2/dbx/releases/download/";
 const CNB_RELEASE_DOWNLOAD_PREFIX = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
@@ -137,6 +131,7 @@ const driverLabels: Record<string, string> = {
   tdengine: "TDengine",
   teradata: "Teradata",
   trino: "Trino",
+  uxdb: "优炫 UXDB",
   vastbase: "Vastbase",
   vertica: "Vertica",
   xugu: "虚谷 XuguDB",
@@ -175,18 +170,12 @@ function siblingReleaseAssetUrl(url: string, filename: string): string {
   return separator >= 0 ? `${url.slice(0, separator + 1)}${filename}` : filename;
 }
 
-function githubReleaseAsset(name: string, size: number, tag = "agents-latest"): GitHubReleaseAsset {
-  return {
-    name,
-    size,
-    browser_download_url: `${GITHUB_RELEASE_DOWNLOAD_PREFIX}${tag}/${name}`,
-  };
-}
-
 function registryReleaseAssets(registry: AgentRegistry): GitHubReleaseAsset[] {
   const assets = new Map<string, GitHubReleaseAsset>();
+  let releaseAssetUrl: string | undefined;
   const addArtifact = (artifact: AgentRegistryArtifact | undefined, fallbackName: string) => {
     if (!artifact?.url) return;
+    releaseAssetUrl ??= artifact.url.startsWith(GITHUB_RELEASE_DOWNLOAD_PREFIX) ? artifact.url : undefined;
     const name = releaseAssetName(artifact.url, fallbackName);
     assets.set(name, { name, size: artifact.size || 0, browser_download_url: artifact.url });
   };
@@ -221,22 +210,18 @@ function registryReleaseAssets(registry: AgentRegistry): GitHubReleaseAsset[] {
     }
   }
 
-  for (const platformKey of Object.keys(registry.jres?.["21"]?.platforms ?? {})) {
-    const name = `dbx-agents-offline-${platformKey}.zip`;
-    assets.set(name, githubReleaseAsset(name, 0));
+  if (releaseAssetUrl) {
+    for (const platformKey of Object.keys(registry.jres?.["21"]?.platforms ?? {})) {
+      const name = `dbx-agents-offline-${platformKey}.zip`;
+      assets.set(name, {
+        name,
+        size: 0,
+        browser_download_url: siblingReleaseAssetUrl(releaseAssetUrl, name),
+      });
+    }
   }
 
   return Array.from(assets.values());
-}
-
-function hasDownloadAssets(catalog: AgentDownloadCatalog): boolean {
-  return catalog.bundles.length > 0 || catalog.drivers.length > 0 || catalog.jres.length > 0 || catalog.nativeAgents.length > 0;
-}
-
-async function fetchJson<T>(url: string, headers?: HeadersInit): Promise<T> {
-  const response = await fetch(url, { cache: "no-store", headers });
-  if (!response.ok) throw new Error(`Download catalog request failed with ${response.status}`);
-  return response.json() as Promise<T>;
 }
 
 export function downloadLinksFor(url: string): DownloadLink[] {
@@ -253,22 +238,8 @@ function assetMap(assets: GitHubReleaseAsset[]): Map<string, GitHubReleaseAsset>
   return new Map(assets.map((asset) => [asset.name, asset]));
 }
 
-export async function fetchAgentDownloadCatalog(): Promise<AgentDownloadCatalog | null> {
-  const loaders: Array<() => Promise<GitHubReleaseAsset[]>> = [
-    async () => (await fetchJson<GitHubRelease>(AGENTS_LATEST_RELEASE_API_URL, { Accept: "application/vnd.github+json" })).assets ?? [],
-    async () => registryReleaseAssets(await fetchJson<AgentRegistry>(CNB_AGENT_REGISTRY_URL)),
-  ];
-
-  for (const loadAssets of loaders) {
-    try {
-      const catalog = buildAgentDownloadCatalog(await loadAssets());
-      if (hasDownloadAssets(catalog)) return catalog;
-    } catch {
-      // Try the next synchronized release source.
-    }
-  }
-
-  return null;
+export function buildAgentDownloadCatalogFromRegistry(registry: AgentRegistry): AgentDownloadCatalog {
+  return buildAgentDownloadCatalog(registryReleaseAssets(registry));
 }
 
 export function buildAgentDownloadCatalog(assets: GitHubReleaseAsset[]): AgentDownloadCatalog {
@@ -316,10 +287,7 @@ export function buildDriverEntries(assets: GitHubReleaseAsset[]): DriverDisplayE
   return currentJavaDriverKeys
     .map((key) => {
       const version = driverVersionMap[key] ?? "";
-      const asset =
-        byName.get(`dbx-agent-${key}-${version}.zip`) ??
-        byName.get(`dbx-agent-${key}-${version}.jar`) ??
-        byName.get(`dbx-agent-${key}.jar`);
+      const asset = byName.get(`dbx-agent-${key}-${version}.zip`) ?? byName.get(`dbx-agent-${key}-${version}.jar`) ?? byName.get(`dbx-agent-${key}.jar`);
       if (!asset) return null;
 
       return {

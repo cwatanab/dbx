@@ -340,7 +340,8 @@ impl DbxBackend for LocalBackend {
         database: &str,
         schema: &str,
     ) -> Result<Vec<TableInfo>, String> {
-        dbx_core::schema::list_tables_core(&self.state, &connection.id, database, schema, None, None, None, None).await
+        dbx_core::schema::list_tables_core(&self.state, &connection.id, database, schema, None, None, None, None, None)
+            .await
     }
 
     async fn get_columns(
@@ -1234,6 +1235,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         truncated: false,
         session_id: None,
         has_more: false,
+        elasticsearch_raw_body: None,
     }
 }
 

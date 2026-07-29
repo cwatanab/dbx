@@ -35,6 +35,36 @@ function semanticCompletion(markedSql: string, input: Partial<SqlCompletionProvi
 }
 
 describe("semantic SQL completion candidates", () => {
+  it("loads nested alias columns through the database-qualified metadata key", () => {
+    const { context, items } = semanticCompletion(
+      "SELECT * FROM aa.tb t WHERE EXISTS (SELECT 1 FROM aa.tb1 t1, aa.tb2 t2 WHERE t1.|)",
+      {
+        columnsByTable: new Map([["aa.tb1", [{ name: "id", table: "tb1", schema: "aa" }]]]),
+      },
+      { databaseType: "mysql", dialect: "mysql" },
+    );
+
+    expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "tb1", schema: "aa", alias: "t1" })]));
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id"]);
+  });
+
+  it("suggests nested tables after a qualified comma", () => {
+    const { context, items } = semanticCompletion("SELECT * FROM aa.tb t WHERE EXISTS (SELECT 1 FROM aa.tb1 t1, aa.|)", { tables: [{ name: "tb2", schema: "aa", type: "table" }] }, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.contextKind).toBe("table");
+    expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "tb2", type: "table" })]));
+  });
+
+  it.each([
+    ["ordinary lowercase", "SELECT * FROM orders_alias a WHERE a.|", "ORDERS_ALIAS", false],
+    ["quoted lowercase", 'SELECT * FROM "orders_alias" a WHERE a.|', "orders_alias", true],
+    ["quoted mixed case", 'SELECT * FROM "Orders_Alias" a WHERE a.|', "Orders_Alias", true],
+  ] as const)("preserves Oracle identifier semantics for %s aliases", (_label, markedSql, expectedName, expectedQuoted) => {
+    const { context } = semanticCompletion(markedSql, {}, { databaseType: "oracle" });
+
+    expect(context.referencedTables).toEqual([expect.objectContaining({ name: expectedName, nameQuoted: expectedQuoted, alias: "A" })]);
+  });
+
   it("isolates SQL Server columns for database-qualified tables with the same schema and name", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["DatabaseA.OUT.orders", [{ name: "source_marker", table: "orders", schema: "OUT" }]],
