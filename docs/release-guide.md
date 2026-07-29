@@ -24,7 +24,7 @@
 $signatureName = "${zipName}.sig"
 if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY)) {
   Write-Host "TAURI_SIGNING_PRIVATE_KEY is empty; creating signature placeholder for portable release."
-  Set-Content -Path $signatureName -Value "" -NoNewline
+  Set-Content -Path $signatureName -Value "placeholder"
 } else {
   if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
     pnpm exec tauri signer sign --password "" $zipName
@@ -62,3 +62,20 @@ done
 
 フォークリポジトリでは Gitee / CNB / AtomGit への同期トークンが存在しないため `Sync Mirrors` ワークフローが失敗します。  
 `.github/workflows/sync-mirrors.yml` の各ジョブに `if: github.repository == 't8y2/dbx'` を指定することで、フォーク環境では安全にスキップ (`skipped`) されるように設定しています。
+
+---
+
+## ⚠️ GitHub Release で "Upload failed. Delete and try uploading this file again." になる場合
+
+### 原因
+1. **GitHub API のアップロード切断・不完全転送**:
+   大容量の Zip アセット（`DBX_0.5.67-unofficial_x64-portable.zip` 等）を CI や CLI 経由でアップロード中、ネットワークの中断や GitHub 側の接続切断が発生すると、GitHub Release 上に壊れたプレースホルダーが残り `Upload failed` と表示されます。
+2. **既存の壊れたアセットとの競合**:
+   Web UI や CLI から同名ファイルを上書きアップロードしようとした際、既に不完全な `Upload failed` 状態のアセットが存在するとアップロードが失敗します。
+
+### 解決方法
+1. **GitHub Web UI で手動削除**:
+   対象リポジトリの Release ページ（例: `v0.5.67-unofficial`）を開き、「Edit release」から `Upload failed` と表示されている `DBX_0.5.67-unofficial_x64-portable.zip` （および `.sig`）のゴミ箱アイコンを押して削除します。
+2. **CI ワークフローの自動リトライ・事前削除**:
+   `.github/workflows/release.yml` では、アップロード前に既存のアセットを `gh release delete-asset` で削除し、最大3回まで自動リトライするよう対策が組み込まれています。
+

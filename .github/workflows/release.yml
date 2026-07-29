@@ -217,7 +217,7 @@ jobs:
           $signatureName = "${zipName}.sig"
           if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY)) {
             Write-Host "TAURI_SIGNING_PRIVATE_KEY is empty; creating signature placeholder for portable release."
-            Set-Content -Path $signatureName -Value "" -NoNewline
+            Set-Content -Path $signatureName -Value "placeholder"
           } else {
             if ([string]::IsNullOrEmpty($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
               pnpm exec tauri signer sign --password "" $zipName
@@ -230,7 +230,23 @@ jobs:
             exit 1
           }
 
-          gh release upload "${env:GITHUB_REF_NAME}" $zipName $signatureName --repo "${env:GITHUB_REPOSITORY}" --clobber
+          $uploaded = $false
+          for ($i = 1; $i -le 3; $i++) {
+            Write-Host "Uploading portable release assets (attempt $i/3)..."
+            gh release delete-asset "${env:GITHUB_REF_NAME}" $zipName --repo "${env:GITHUB_REPOSITORY}" --yes 2>$null
+            gh release delete-asset "${env:GITHUB_REF_NAME}" $signatureName --repo "${env:GITHUB_REPOSITORY}" --yes 2>$null
+            gh release upload "${env:GITHUB_REF_NAME}" $zipName $signatureName --repo "${env:GITHUB_REPOSITORY}" --clobber
+            if ($LASTEXITCODE -eq 0) {
+              $uploaded = $true
+              break
+            }
+            Write-Warning "Upload attempt $i failed. Retrying in 5 seconds..."
+            Start-Sleep -Seconds 5
+          }
+          if (!$uploaded) {
+            Write-Error "Failed to upload $zipName and $signatureName after 3 attempts."
+            exit 1
+          }
 
 
 
