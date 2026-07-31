@@ -4249,7 +4249,7 @@ function isLegacySshAgentMethod(hop: Partial<SshTunnelConfig> | null | undefined
 function updateSelectedSshAuthMethod(value: unknown) {
   const layer = selectedSshLayer.value;
   if (!layer) return;
-  layer.auth_method = value === "key" ? "key" : value === "key+password" ? "key+password" : value === "none" ? "none" : "password";
+  layer.auth_method = value === "key" ? "key" : value === "key+password" ? "key+password" : value === "none" ? "none" : value === "agent" ? "agent" : "password";
   // Scrub credential fields that do not apply to the selected method so
   // they are not accidentally submitted or used by the backend fallback.
   // "key+password" keeps both key and password fields.
@@ -4258,7 +4258,9 @@ function updateSelectedSshAuthMethod(value: unknown) {
     layer.key_path = "";
     layer.key_passphrase = "";
   }
-  if (layer.auth_method !== "key" && layer.auth_method !== "key+password") {
+  if (layer.auth_method === "agent") {
+    layer.use_ssh_agent = true;
+  } else if (layer.auth_method !== "key" && layer.auth_method !== "key+password") {
     layer.use_ssh_agent = false;
   }
   resetTestState();
@@ -6893,8 +6895,8 @@ function openExternalUrl(url: string) {
                           <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
                           <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
                           <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
+                          <SelectItem value="agent">{{ t("connection.sshAuthMethodAgent") }}</SelectItem>
                           <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
-                          <SelectItem v-if="isLegacySshAgentMethod(selectedSshLayer)" value="agent" disabled>{{ t("connection.sshAuthMethodAgentLegacy") }}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
@@ -6924,15 +6926,15 @@ function openExternalUrl(url: string) {
                       <span />
                       <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.sshAuthMethodNoneHint") }}</p>
                     </div>
-                    <template v-if="selectedSshLayer.auth_method === 'key' || selectedSshLayer.auth_method === 'key+password' || isLegacySshAgentMethod(selectedSshLayer)">
-                      <div class="grid grid-cols-4 items-center gap-4">
+                    <template v-if="selectedSshLayer.auth_method === 'key' || selectedSshLayer.auth_method === 'key+password' || selectedSshLayer.auth_method === 'agent' || isLegacySshAgentMethod(selectedSshLayer)">
+                      <div v-if="selectedSshLayer.auth_method !== 'agent'" class="grid grid-cols-4 items-center gap-4">
                         <span />
                         <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                           <input type="checkbox" v-model="selectedSshLayer.use_ssh_agent" class="mr-0" :disabled="selectedSshLayer.enabled === false" />
                           <span class="text-xs text-muted-foreground">{{ t("connection.sshUseAgent") }}</span>
                         </label>
                       </div>
-                      <div v-if="selectedSshLayer.use_ssh_agent" class="grid grid-cols-4 items-center gap-4">
+                      <div v-if="selectedSshLayer.use_ssh_agent || selectedSshLayer.auth_method === 'agent'" class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelSmallClass">{{ t("connection.sshAgentSockPath") }}</Label>
                         <Input v-model="selectedSshLayer.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
                       </div>

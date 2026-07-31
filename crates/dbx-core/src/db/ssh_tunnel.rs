@@ -317,26 +317,40 @@ async fn connect_and_authenticate(
     let try_agent = auth_method.is_empty() && use_ssh_agent || auth_method == "agent";
 
     if try_key {
-        // Validate SSH key file path
-        validate_file_path(ssh_key_path, |_| false)?;
+        let mut authenticated = false;
+        if !ssh_key_path.is_empty() {
+            validate_file_path(ssh_key_path, |_| false)?;
 
-        let passphrase = if ssh_key_passphrase.is_empty() { None } else { Some(ssh_key_passphrase) };
-        let key_pair =
-            load_ssh_private_key(ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
-        let auth_res = tokio::time::timeout(
-            connect_timeout,
-            session.authenticate_publickey(
-                ssh_user,
-                PrivateKeyWithHashAlg::new(
-                    Arc::new(key_pair),
-                    session.best_supported_rsa_hash().await.ok().flatten().flatten(),
+            let passphrase = if ssh_key_passphrase.is_empty() { None } else { Some(ssh_key_passphrase) };
+            let key_pair =
+                load_ssh_private_key(ssh_key_path, passphrase).map_err(|e| format!("Failed to load SSH key: {e}"))?;
+            let auth_res = tokio::time::timeout(
+                connect_timeout,
+                session.authenticate_publickey(
+                    ssh_user,
+                    PrivateKeyWithHashAlg::new(
+                        Arc::new(key_pair),
+                        session.best_supported_rsa_hash().await.ok().flatten().flatten(),
+                    ),
                 ),
-            ),
-        )
-        .await
-        .map_err(|_| format!("SSH key auth timed out ({connect_timeout_secs}s)"))?
-        .map_err(|e| format!("SSH key auth failed: {e}"))?;
-        if !auth_res.success() {
+            )
+            .await
+            .map_err(|_| format!("SSH key auth timed out ({connect_timeout_secs}s)"))?
+            .map_err(|e| format!("SSH key auth failed: {e}"))?;
+            if auth_res.success() {
+                authenticated = true;
+            }
+        }
+
+        if !authenticated && use_ssh_agent {
+            match try_authenticate_with_agent(&mut session, ssh_user, ssh_agent_sock_path, &connect_timeout).await {
+                Ok(()) => authenticated = true,
+                Err(agent_err) if ssh_key_path.is_empty() => return Err(agent_err),
+                Err(_) => {}
+            }
+        }
+
+        if !authenticated {
             return Err("SSH public key authentication failed".to_string());
         }
     } else if try_password {
