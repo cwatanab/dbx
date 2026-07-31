@@ -114,7 +114,6 @@ jobs:
             git rebase origin/main
           done
 
->>>>>>> v0.5.71
   build:
     needs: release-ready
     strategy:
@@ -804,4 +803,3 @@ jobs:
             -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
             -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
             $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)
->>>>>>> v0.5.71
