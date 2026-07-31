@@ -6924,7 +6924,7 @@ function openExternalUrl(url: string) {
                       <span />
                       <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.sshAuthMethodNoneHint") }}</p>
                     </div>
-                    <template v-if="isLegacySshAgentMethod(selectedSshLayer)">
+                    <template v-if="selectedSshLayer.auth_method === 'key' || selectedSshLayer.auth_method === 'key+password' || isLegacySshAgentMethod(selectedSshLayer)">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <span />
                         <label class="col-span-3 flex items-center gap-2 cursor-pointer">
