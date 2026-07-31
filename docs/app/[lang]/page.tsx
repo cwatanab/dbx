@@ -46,6 +46,7 @@ function metrics(starLabel: string) {
 const databaseSupport = [
   { name: "MySQL", icon: "/icons/database/mysql.svg", tone: "#4479a1" },
   { name: "PostgreSQL", icon: "/icons/database/postgres.svg", tone: "#4169e1" },
+  { name: "Cloudberry", icon: "/icons/database/cloudberry.svg", tone: "#ff5900" },
   { name: "SQLite", icon: "/icons/database/sqlite.svg", tone: "#5aa6d6" },
   { name: "Redis", icon: "/icons/database/redis.svg", tone: "#ff4438" },
   { name: "DuckDB", icon: "/icons/database/duckdb.svg", tone: "#fff000" },
@@ -54,11 +55,12 @@ const databaseSupport = [
   { name: "MongoDB", icon: "/icons/database/mongodb.svg", tone: "#47a248" },
   { name: "Oracle", icon: "/icons/database/oracle.svg", tone: "#f80000" },
   { name: "Elasticsearch", icon: "/icons/database/elasticsearch.svg", tone: "#00bfb3" },
+  { name: "Easysearch", icon: "/icons/database/easysearch.svg", tone: "#231815" },
   { name: "Qdrant", icon: "/icons/database/qdrant.svg", tone: "#dc244c" },
   { name: "Milvus", icon: "/icons/database/milvus.png", tone: "#00a1ea" },
-  { name: "Weaviate", icon: "/icons/database/weaviate.png", tone: "#00b894" },
-  { name: "ChromaDB", shortLabel: "CH", tone: "#ff7a59" },
-  { name: "Cloudflare D1", shortLabel: "D1", tone: "#f6821f" },
+  { name: "Weaviate", icon: "/icons/database/weaviate.svg", tone: "#00b894" },
+  { name: "ChromaDB", icon: "/icons/database/chromadb.svg", tone: "#ff7a59" },
+  { name: "Cloudflare D1", icon: "/icons/database/cloudflare-d1.svg", tone: "#f6821f" },
   { name: "MariaDB", icon: "/icons/database/mariadb.svg", tone: "#003545" },
   { name: "Doris", icon: "/icons/database/doris.svg", tone: "#5b7cfa" },
   { name: "StarRocks", icon: "/icons/database/starrocks.svg", tone: "#6750ff" },
@@ -69,9 +71,10 @@ const databaseSupport = [
   { name: "openGauss", icon: "/icons/database/opengauss.svg", tone: "#1488c9" },
   { name: "KingBase", icon: "/icons/database/kingbase.svg", tone: "#e1212d" },
   { name: "HighGo", icon: "/icons/database/highgo.png", tone: "#005bac" },
+  { name: "UXDB", icon: "/icons/database/uxdb.svg", tone: "#142b8c" },
   { name: "TiDB", icon: "/icons/database/tidb.svg", tone: "#e60012" },
   { name: "OceanBase", icon: "/icons/database/oceanbase.svg", tone: "#2285ff" },
-  { name: "TDSQL", icon: "/icons/database/tdsql.webp", tone: "#0080ff" },
+  { name: "TDSQL", icon: "/icons/database/tdsql.svg", tone: "#0080ff" },
   { name: "PolarDB", icon: "/icons/database/polardb.webp", tone: "#1890ff" },
   { name: "GreatSQL", icon: "/icons/database/greatsql.webp", tone: "#0066b3" },
   { name: "SelectDB", icon: "/icons/database/selectdb.svg", tone: "#22c1c3" },
@@ -80,45 +83,48 @@ const databaseSupport = [
   { name: "RQLite", icon: "/icons/database/rqlite.png", tone: "#5a67d8" },
   { name: "Turso", icon: "/icons/database/turso.png", tone: "#10b981" },
   { name: "Databend", icon: "/icons/database/databend.svg", tone: "#f59e0b" },
-  { name: "Databricks", icon: "/icons/database/databricks.webp", tone: "#ff5a1f" },
+  { name: "Databricks", icon: "/icons/database/databricks.svg", tone: "#ff5a1f" },
   { name: "Snowflake", icon: "/icons/database/snowflake.svg", tone: "#29b5e8" },
   { name: "BigQuery", icon: "/icons/database/bigquery.svg", tone: "#4285f4" },
   { name: "Trino", icon: "/icons/database/trino.svg", tone: "#dd00a1" },
   { name: "PrestoSQL", icon: "/icons/database/presto.svg", tone: "#5890ff" },
   { name: "Hive", icon: "/icons/database/hive.svg", tone: "#fdcb00" },
-  { name: "Spark", shortLabel: "SP", tone: "#e25a1c" },
+  { name: "HBase", icon: "/icons/database/hbase.svg", tone: "#ba160c" },
+  { name: "Spark", icon: "/icons/database/spark-logo.png", tone: "#e25a1c" },
   { name: "DB2", icon: "/icons/database/db2.svg", tone: "#054ada" },
-  { name: "SAP HANA", icon: "/icons/database/saphana.webp", tone: "#008fd3" },
-  { name: "Teradata", icon: "/icons/database/teradata.webp", tone: "#f37440" },
+  { name: "SAP HANA", icon: "/icons/database/saphana.svg", tone: "#008fd3" },
+  { name: "Teradata", icon: "/icons/database/teradata.svg", tone: "#f37440" },
   { name: "Vertica", icon: "/icons/database/vertica.webp", tone: "#007dc5" },
-  { name: "Exasol", icon: "/icons/database/exasol.webp", tone: "#002b45" },
-  { name: "Firebird", icon: "/icons/database/firebird.webp", tone: "#e17000" },
+  { name: "Exasol", icon: "/icons/database/exasol.svg", tone: "#002b45" },
+  { name: "Firebird", icon: "/icons/database/firebird.svg", tone: "#e17000" },
   { name: "Informix", icon: "/icons/database/informix.svg", tone: "#0178c8" },
   { name: "Neo4j", icon: "/icons/database/neo4j.svg", tone: "#018bff" },
   { name: "Cassandra", icon: "/icons/database/cassandra.svg", tone: "#1287b1" },
   { name: "Kylin", icon: "/icons/database/apache_kylin.svg", tone: "#fb8c00" },
-  { name: "Dremio", shortLabel: "DR", tone: "#30bdbe" },
-  { name: "OSCAR", shortLabel: "OS", tone: "#1b8dff" },
+  { name: "Dremio", icon: "/icons/database/dremio.svg", tone: "#30bdbe" },
+  { name: "OSCAR", icon: "/icons/database/oscar.png", tone: "#1b8dff" },
   { name: "InfluxDB", icon: "/icons/database/influxdb.svg", tone: "#22adf6" },
   { name: "QuestDB", icon: "/icons/database/questdb.svg", tone: "#dc2626" },
   { name: "IoTDB", icon: "/icons/database/iotdb.svg", tone: "#3cb371" },
   { name: "KWDB", icon: "/icons/database/kwdb.svg", tone: "#6366f1" },
-  { name: "Vastbase", icon: "/icons/database/vastbase.png", tone: "#2563eb" },
+  { name: "Vastbase", icon: "/icons/database/vastbase.svg", tone: "#2563eb" },
   { name: "GoldenDB", icon: "/icons/database/goldendb.png", tone: "#eab308" },
   { name: "YashanDB", icon: "/icons/database/yashandb.png", tone: "#dc2626" },
   { name: "SunDB", icon: "/icons/database/sundb.svg", tone: "#f97316" },
   { name: "XuguDB", icon: "/icons/database/xugu.png", tone: "#84cc16" },
-  { name: "GBase", icon: "/icons/database/gbase.webp", tone: "#06b6d4" },
+  { name: "GBase", icon: "/icons/database/gbase.png", tone: "#06b6d4" },
   { name: "Access", icon: "/icons/database/access.png", tone: "#a53346" },
   { name: "H2", icon: "/icons/database/h2.svg", tone: "#f7a81b" },
   { name: "Etcd", icon: "/icons/database/etcd.svg", tone: "#419eda" },
   { name: "ZooKeeper", icon: "/icons/database/zookeeper.svg", tone: "#3b82f6" },
   { name: "Pulsar", icon: "/icons/database/pulsar.svg", tone: "#188fff" },
-  { name: "Kafka", shortLabel: "KF", tone: "#231f20" },
+  { name: "Kafka", icon: "/icons/database/kafka.svg", tone: "#231f20" },
+  { name: "RocketMQ", icon: "/icons/database/rocketmq.svg", tone: "#f97316" },
+  { name: "RabbitMQ", icon: "/icons/database/rabbitmq.svg", tone: "#f97316" },
   { name: "Nacos", icon: "/icons/database/nacos.png", tone: "#2f80ed" },
-  { name: "IRIS", icon: "/icons/database/iris.png", tone: "#0085ca" },
-  { name: "JDBC", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff" },
-  { name: "Your DB?", icon: "/icons/database/jdbc.svg", tone: "#6ea8ff", href: "https://github.com/t8y2/dbx/discussions", cta: true },
+  { name: "IRIS", icon: "/icons/database/iris.svg", tone: "#0085ca" },
+  { name: "JDBC", icon: "/icons/database/jdbcx.svg", tone: "#6ea8ff" },
+  { name: "Your DB?", icon: "/icons/database/jdbcx.svg", tone: "#6ea8ff", href: "https://github.com/t8y2/dbx/discussions", cta: true },
 ];
 
 const workflows = {
@@ -377,9 +383,11 @@ const i18nText = {
     capabilitiesTitle: "Built for real database work",
     contributorsTitle: "Built by the community",
     contributorsDesc: "DBX is fully open-source. Every feature, fix, and driver starts with a contributor.",
-    sponsorLabel: "Infrastructure Sponsor",
-    sponsorDesc: "RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.",
-    sponsorAction: "Visit RainYun",
+    sponsorLabel: "Infrastructure Sponsors",
+    qiniuSponsorDesc: "Qiniu Cloud provides DBX with object storage, CDN, and other cloud infrastructure resources.",
+    qiniuSponsorAction: "Visit Qiniu Cloud",
+    rainyunSponsorDesc: "RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.",
+    rainyunSponsorAction: "Visit RainYun",
     footerTitle: "Ready to try DBX?",
     footerDesc: "Use the desktop app for local work, or deploy the Docker version for browser-based access.",
     release: "Latest release",
@@ -403,9 +411,11 @@ const i18nText = {
     capabilitiesTitle: "面向真实数据库工作的能力",
     contributorsTitle: "社区共建",
     contributorsDesc: "DBX 因每一位贡献者而生长",
-    sponsorLabel: "基础设施赞助",
-    sponsorDesc: "雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。",
-    sponsorAction: "访问雨云",
+    sponsorLabel: "基础设施赞助商",
+    qiniuSponsorDesc: "七牛云为 DBX 提供对象存储、CDN 等云基础设施资源支持。",
+    qiniuSponsorAction: "访问七牛云",
+    rainyunSponsorDesc: "雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。",
+    rainyunSponsorAction: "访问雨云",
     footerTitle: "准备试试 DBX？",
     footerDesc: "本地工作使用桌面版，需要浏览器访问时部署 Docker 版。",
     release: "最新版本",
@@ -454,6 +464,24 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
   const contributors = contributorsFromActivity(contributorData.contributors);
   const initialDownloadVersion = initialLatestRelease?.version ?? appVersion;
   const testimonialItems = testimonials[l];
+  const sponsorItems = [
+    {
+      name: "RainYun",
+      href: "https://www.rainyun.com/MTE5Mjc4Ng==_",
+      logo: "https://www.rainyun.com/img/logo.d193755d.png",
+      logoClass: "h-10 w-auto max-w-[100px]",
+      description: t.rainyunSponsorDesc,
+      action: t.rainyunSponsorAction,
+    },
+    {
+      name: l === "cn" ? "七牛云" : "Qiniu Cloud",
+      href: "https://www.qiniu.com/",
+      logo: "https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg",
+      logoClass: "h-14 w-14 object-contain",
+      description: t.qiniuSponsorDesc,
+      action: t.qiniuSponsorAction,
+    },
+  ];
 
   return (
     <main className="landing">
@@ -551,10 +579,8 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
               <div className="landing-db-icon grid place-items-center w-12 h-12 mb-[15px]">
                 {isCta ? (
                   <span className="grid place-items-center w-10 h-10 rounded-full border-2 border-dashed text-landing-blue border-landing-blue text-2xl leading-none">+</span>
-                ) : db.icon ? (
-                  <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" />
                 ) : (
-                  <span className="grid place-items-center min-w-[46px] h-8 rounded-lg px-2 text-xs font-[780] text-white" style={{ backgroundColor: db.tone }}>{db.shortLabel ?? db.name.slice(0, 2).toUpperCase()}</span>
+                  <img src={db.icon} alt="" width={38} height={38} className="block w-[38px] h-[38px] object-contain" />
                 )}
               </div>
               <strong className={`text-sm font-[650] leading-[1.2] text-center ${isCta ? "text-landing-blue" : "text-[color-mix(in_srgb,var(--color-landing-ink)_92%,var(--color-landing-muted))]"}`}>{db.name}</strong>
@@ -598,17 +624,23 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
 
       {/* Sponsor */}
       <RevealSection className="max-w-[1180px] mx-auto px-7 mt-10 max-[760px]:px-[18px]">
-        <div className="flex items-center justify-between gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 max-[760px]:block">
-          <Link href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank" className="flex shrink-0 items-center justify-center rounded-lg bg-white px-4 py-3 shadow-[0_10px_30px_rgba(15,23,42,0.08)] max-[760px]:w-max">
-            <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="RainYun" className="h-10 w-auto max-w-[150px]" />
-          </Link>
-          <div className="min-w-0 flex-1 max-[760px]:mt-4">
-            <p className="m-0 text-xs font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.sponsorLabel}</p>
-            <p className="mt-1.5 text-sm leading-[1.65] text-landing-muted">{t.sponsorDesc}</p>
-          </div>
-          <Link href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank" className="landing-final-link inline-flex shrink-0 items-center justify-center min-h-[42px] rounded-[7px] px-[15px] text-sm font-[650] max-[760px]:mt-4">
-            {t.sponsorAction}
-          </Link>
+        <p className="m-0 text-xs font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.sponsorLabel}</p>
+        <div className="mt-3 grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
+          {sponsorItems.map((sponsor) => (
+            <div key={sponsor.name} className="flex min-h-[154px] items-center gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 max-[560px]:block">
+              <Link href={sponsor.href} target="_blank" className="flex h-20 w-28 shrink-0 items-center justify-center rounded-lg bg-white px-4 py-3 shadow-[0_10px_30px_rgba(15,23,42,0.08)]">
+                <img src={sponsor.logo} alt={sponsor.name} className={sponsor.logoClass} />
+              </Link>
+              <div className="min-w-0 flex-1 max-[560px]:mt-4">
+                <h2 className="text-lg font-[720] text-landing-ink">{sponsor.name}</h2>
+                <p className="mt-1.5 text-sm leading-[1.65] text-landing-muted">{sponsor.description}</p>
+                <Link href={sponsor.href} target="_blank" className="landing-inline-link mt-3 inline-flex items-center gap-[7px] text-sm font-[650]">
+                  {sponsor.action}
+                  <span aria-hidden="true">→</span>
+                </Link>
+              </div>
+            </div>
+          ))}
         </div>
       </RevealSection>
 

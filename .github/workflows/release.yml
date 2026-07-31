@@ -14,7 +14,109 @@ env:
   CNB_REGISTRY: "docker.cnb.cool"
 
 jobs:
+  release-ready:
+    name: Verify draft release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          for attempt in $(seq 1 30); do
+            RELEASE_JSON="$(gh release view "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --json tagName,isDraft,body 2>/dev/null || true)"
+            if [ -n "$RELEASE_JSON" ] \
+              && [ "$(jq -r '.tagName' <<<"$RELEASE_JSON")" = "${GITHUB_REF_NAME}" ] \
+              && [ "$(jq -r '.isDraft' <<<"$RELEASE_JSON")" = true ] \
+              && [ -n "$(jq -r '.body' <<<"$RELEASE_JSON")" ]; then
+              echo "Agent-created draft release is ready."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Agent-created draft release was not ready for ${GITHUB_REF_NAME}." >&2
+          exit 1
+
+  nix-packaging:
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build Nix desktop package
+        run: nix build .#dbx-desktop --no-link --print-build-logs
+
+  bump-jdbc-plugin-version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.bump.outputs.changed }}
+      old_version: ${{ steps.bump.outputs.old_version }}
+      new_version: ${{ steps.bump.outputs.new_version }}
+      prev_tag: ${{ steps.prev-tag.outputs.prev_tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Find previous release tag
+        id: prev-tag
+        shell: bash
+        run: |
+          PREV_TAG=$(git tag --sort=-creatordate | grep '^v' | sed -n '2p')
+          if [ -z "$PREV_TAG" ]; then
+            PREV_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Comparing ${PREV_TAG}..HEAD"
+
+      - name: Detect JDBC plugin changes and bump version
+        id: bump
+        shell: bash
+        run: |
+          BUMP_OUTPUT="$(node .github/scripts/bump-jdbc-plugin-version.mjs "${{ steps.prev-tag.outputs.prev_tag }}" HEAD --write)"
+          echo "$BUMP_OUTPUT"
+          echo "$BUMP_OUTPUT" >> "$GITHUB_OUTPUT"
+
+      - name: Commit JDBC plugin version bump
+        if: steps.bump.outputs.changed == 'true'
+        shell: bash
+        run: |
+          TMP_DIR="$(mktemp -d)"
+          cp plugins/jdbc/pom.xml "$TMP_DIR/pom.xml"
+          cp plugins/jdbc/manifest.json "$TMP_DIR/manifest.json"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git switch -C jdbc-plugin-version-bump origin/main
+          cp "$TMP_DIR/pom.xml" plugins/jdbc/pom.xml
+          cp "$TMP_DIR/manifest.json" plugins/jdbc/manifest.json
+          git add plugins/jdbc/pom.xml plugins/jdbc/manifest.json
+          if git diff --cached --quiet; then
+            echo "JDBC plugin version ${{ steps.bump.outputs.new_version }} is already on main."
+            exit 0
+          fi
+          git commit -m "chore(jdbc): bump plugin version [skip ci]"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Unable to push JDBC plugin version bump after ${attempt} attempts."
+              exit 1
+            fi
+            git fetch origin main --no-tags
+            git rebase origin/main
+          done
+
+>>>>>>> v0.5.71
   build:
+    needs: release-ready
     strategy:
       fail-fast: false
       matrix:
@@ -130,25 +232,6 @@ jobs:
             echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
           fi
 
-      - name: Generate release notes
-        id: release-notes
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BODY="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="${GITHUB_REF_NAME}" \
-            --jq '.body')"
-          if [ -z "$BODY" ]; then
-            BODY="DBX ${GITHUB_REF_NAME}"
-          fi
-          DELIM="RELEASE_NOTES_$(date +%s%N)"
-          {
-            echo "body<<$DELIM"
-            printf '%s\n' "$BODY"
-            echo "$DELIM"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -159,10 +242,7 @@ jobs:
           APPLE_TEAM_ID: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_TEAM_ID || '' }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "DBX ${{ github.ref_name }}"
-          releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: true
-          prerelease: false
           args: --target ${{ matrix.target }}
 
       - name: Show sccache stats
@@ -250,6 +330,7 @@ jobs:
 
 
   build-windows-7-offline:
+    needs: release-ready
     runs-on: windows-2022
     env:
       CARGO_INCREMENTAL: "0"
@@ -359,8 +440,7 @@ jobs:
     # Fully static musl builds of the browser (dbx-web) variant. No glibc
     # dependency, so the tarball runs on any Linux distribution (verified in
     # the oldest pullable Ubuntu container for each arch).
->>>>>>> v0.5.68
-    needs: build
+    needs: release-ready
     strategy:
       fail-fast: false
       matrix:
@@ -413,7 +493,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           cargo zigbuild --release -p dbx-web --target ${{ matrix.target }} \
-            --no-default-features --features "duckdb-bundled,mq-admin"
+            --no-default-features --features "duckdb-sidecar,mq-admin"
 
       - name: Package static browser runtime
         env:
@@ -486,7 +566,68 @@ jobs:
               --yes
           done
 
-    # Keep the release as a draft until every platform and the Nix package pass.
+  jdbc-plugin:
+    needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Apply automatic JDBC plugin version bump
+        shell: bash
+        run: node .github/scripts/bump-jdbc-plugin-version.mjs "${{ needs.bump-jdbc-plugin-version.outputs.prev_tag }}" HEAD --write
+
+      - name: Read JDBC plugin version
+        id: jdbc-plugin
+        shell: bash
+        run: |
+          VERSION="$(grep -m1 '<version>' plugins/jdbc/pom.xml | sed -E 's/.*<version>([^<]+)<.*/\1/')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Package JDBC plugin
+        run: ./plugins/jdbc/package.sh
+
+      - name: Upload JDBC plugin asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            "plugins/jdbc/dist/dbx-jdbc-plugin-${{ steps.jdbc-plugin.outputs.version }}.zip" \
+            "plugins/jdbc/dist/dbx-jdbc-plugin-latest.zip" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+      - name: Add JDBC plugin metadata to latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/latest-json"
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern latest.json \
+            --dir "$RUNNER_TEMP/latest-json"
+          node .github/scripts/augment-latest-json-jdbc-plugin.mjs \
+            "$RUNNER_TEMP/latest-json/latest.json" \
+            "${{ steps.jdbc-plugin.outputs.version }}" \
+            "1" \
+            "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip"
+          gh release upload "${GITHUB_REF_NAME}" \
+            "$RUNNER_TEMP/latest-json/latest.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+  publish:
+    # Keep the release as a draft until every release-blocking platform job passes.
+    # Nix packaging is advisory and runs independently from publication.
     needs: [cleanup-release-signatures, docker-manifest, jdbc-plugin, nix-packaging, static-browser]
     runs-on: ubuntu-latest
     steps:
@@ -494,3 +635,173 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false --prerelease
+
+  sync-release-to-cnb:
+    name: Sync release to CNB
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download GitHub release assets
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/github-release" "$RUNNER_TEMP/release-assets"
+          gh release view "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,body,targetCommitish,isPrerelease,isDraft,assets \
+            > "$RUNNER_TEMP/github-release/release.json"
+          gh release download "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets" \
+            --clobber
+
+      - name: Sync release assets to CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_UPLOAD_CONCURRENCY: "3"
+        run: |
+          node .github/scripts/sync-cnb-release.mjs \
+            --github-release "$RUNNER_TEMP/github-release/release.json" \
+            --assets-dir "$RUNNER_TEMP/release-assets"
+
+      - name: Keep latest five app releases in CNB
+        continue-on-error: true
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CURRENT_TAG: ${{ github.ref_name }}
+        run: |
+          node .github/scripts/cleanup-cnb-releases.mjs \
+            --current-tag "$CURRENT_TAG" \
+            --tag-pattern '^v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$' \
+            --retain 5 \
+            --apply
+
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to CNB Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.CNB_REGISTRY }}
+          username: cnb
+          password: ${{ secrets.CNB_TOKEN }}
+
+      - name: Build and push Docker Hub by digest
+        id: build-dockerhub
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/dbx,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+
+      - name: Build and push CNB by digest
+        id: build-cnb
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+
+      - name: Export digests
+        run: |
+          mkdir -p /tmp/digests/dockerhub /tmp/digests/cnb
+          dockerhub_digest="${{ steps.build-dockerhub.outputs.digest }}"
+          cnb_digest="${{ steps.build-cnb.outputs.digest }}"
+          touch "/tmp/digests/dockerhub/${dockerhub_digest#sha256:}"
+          touch "/tmp/digests/cnb/${cnb_digest#sha256:}"
+
+      - name: Upload Docker Hub digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: dockerhub-digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/dockerhub/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload CNB digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: cnb-digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/cnb/*
+          if-no-files-found: error
+          retention-days: 1
+
+  docker-manifest:
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Docker Hub digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests/dockerhub
+          pattern: dockerhub-digests-*
+          merge-multiple: true
+
+      - name: Download CNB digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests/cnb
+          pattern: cnb-digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to CNB Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.CNB_REGISTRY }}
+          username: cnb
+          password: ${{ secrets.CNB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create manifest list and push
+        run: |
+          docker buildx imagetools create \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:${{ steps.version.outputs.version }} \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:latest \
+            $(cd /tmp/digests/dockerhub && printf '${{ secrets.DOCKERHUB_USERNAME }}/dbx@sha256:%s ' *)
+
+          docker buildx imagetools create \
+            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
+            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
+            $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)
+>>>>>>> v0.5.71

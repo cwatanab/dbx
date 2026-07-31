@@ -2,7 +2,7 @@
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge } from "@lucide/vue";
+import { X, Pin, ChevronDown, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Lock, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -129,8 +129,12 @@ function startRenameTab(tab: QueryTab) {
   editingTitle.value = tab.title;
   nextTick(() => {
     const input = document.querySelector<HTMLInputElement>(`[data-tab-title-input="${tab.id}"]`);
-    input?.focus();
-    input?.select();
+    if (input) {
+      input.focus();
+      const dotIndex = input.value.lastIndexOf(".");
+      const selectEnd = dotIndex > 0 ? dotIndex : input.value.length;
+      input.setSelectionRange(0, selectEnd);
+    }
   });
 }
 
@@ -445,7 +449,8 @@ function tabColorStyle(tab: QueryTab) {
 
 function tabIconClass(tab: QueryTab) {
   if (tab.mode === "mq") return "";
-  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "objects" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
+  if (tab.mode === "objects") return "text-amber-500 dark:text-amber-400";
+  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "hbase" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
   return "text-blue-600 dark:text-blue-400";
 }
 
@@ -472,10 +477,11 @@ const tabBarClass = computed(() => [isClassicLayout.value ? "bg-muted" : "border
 const regularTabRowClass = computed(() => [isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2", isClassicLayout.value && !hasFixedTabs.value ? "border-b" : ""]);
 
 function tabMenuIcon(tab: QueryTab) {
-  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis") return Table2;
+  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
   if (tab.mode === "vector") return TableProperties;
   if (tab.mode === "etcd" || tab.mode === "zookeeper") return KeyRound;
   if (tab.mode === "etcd-dashboard") return Gauge;
+  if (tab.mode === "etcd-access-control") return ShieldCheck;
   if (tab.mode === "nacos") return Network;
   if (tab.mode === "objects") return TableProperties;
   if (tab.mode === "structure") return PencilRuler;
@@ -615,11 +621,12 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
                     <span class="shrink-0" :class="tabIconClass(tab)">
-                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis'" class="h-3.5 w-3.5" />
+                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
+                      <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />
@@ -809,11 +816,12 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                     @mouseleave="tabDrag.clearTarget(tab.id)"
                   >
                     <span class="shrink-0" :class="tabIconClass(tab)">
-                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis'" class="h-3.5 w-3.5" />
+                      <Table2 v-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                       <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
+                      <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'objects'" class="h-3.5 w-3.5" />
                       <PencilRuler v-else-if="tab.mode === 'structure'" class="h-3.5 w-3.5" />

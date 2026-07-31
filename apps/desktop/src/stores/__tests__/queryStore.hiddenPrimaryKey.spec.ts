@@ -131,6 +131,44 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryEditabilityReason).toBeUndefined();
   });
 
+  it("starts a qualified MySQL star query before slow column metadata finishes", async () => {
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    getColumns.mockReturnValue(columnsGate.promise);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "sys_dept",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["dept_id", "dept_name"],
+        rows: [[1, "Headquarters"]],
+        affected_rows: 0,
+        execution_time_ms: 12,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    const execution = store.executeTabSql(tabId, "SELECT sys_dept.* FROM sys_dept");
+    await vi.waitFor(() => expect(executeMulti).toHaveBeenCalled());
+    expect(executeMulti).toHaveBeenCalledWith("mysql-1", "app", "SELECT sys_dept.* FROM sys_dept", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+
+    columnsGate.resolve([
+      { name: "dept_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "dept_name", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    await execution;
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta?.tableName).toBe("sys_dept"));
+  });
+
   it("loads metadata from the connection default database when the query tab database is empty", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
@@ -206,6 +244,45 @@ describe("queryStore hidden primary key editing", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
     expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("starts a MySQL JDBC star query before slow column metadata finishes", async () => {
+    const columnsGate = deferred<Awaited<ReturnType<typeof getColumns>>>();
+    getConnectionConfig.mockReturnValue({ id: "jdbc-1", name: "JDBC MySQL", db_type: "jdbc", connection_string: "jdbc:mysql://localhost:3306/app", database: "app", query_timeout_secs: 30 });
+    getColumns.mockReturnValue(columnsGate.promise);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "sys_dept",
+        selectStar: true,
+        columns: [],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["dept_id", "dept_name"],
+        rows: [[1, "Headquarters"]],
+        affected_rows: 0,
+        execution_time_ms: 12,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("jdbc-1", "", "Query");
+
+    const execution = store.executeTabSql(tabId, "SELECT * FROM sys_dept");
+    await vi.waitFor(() => expect(executeMulti).toHaveBeenCalled());
+    expect(executeMulti).toHaveBeenCalledWith("jdbc-1", "", "SELECT * FROM sys_dept", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+
+    columnsGate.resolve([
+      { name: "dept_id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "dept_name", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    await execution;
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta?.tableName).toBe("sys_dept"));
   });
 
   it("keeps an explicitly selected database instead of falling back to the connection default", async () => {
@@ -492,6 +569,22 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.resultSortedSql).toBe("SELECT name, `id` AS `__DBX_PK_0` FROM users ORDER BY name ASC");
     await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
     expect(tab.queryAnalysis).toBeDefined();
+
+    await store.executeTabSql(tabId, "SELECT name FROM users", {
+      resultBaseSql: "SELECT name FROM users",
+      resultSortedSql: tab.resultSortedSql,
+      querySort: {
+        resultColumns: ["name"],
+        columnIndex: 0,
+        column: "name",
+        direction: "asc",
+      },
+      pagination: { offset: 100, limit: 100 },
+    });
+
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["name", "id"]));
+    expect(tab.queryEditabilityReason).toBeUndefined();
+    expect(tab.result?.hidden_column_indexes).toEqual([1]);
   });
 
   it("clears result sorting when the editor SQL is executed again", async () => {
@@ -836,5 +929,42 @@ describe("queryStore hidden primary key editing", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.resultTotalRowCount).toBe(123));
     expect(tab.resultTotalRowCountLoading).toBe(false);
+  });
+
+  it("stops appending when a SQL Server query has no bounded next-page plan", async () => {
+    getConnectionConfig.mockReturnValue({ id: "sqlserver-1", name: "SQL Server", db_type: "sqlserver", database: "app", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-query" });
+    const rows = Array.from({ length: 28 }, (_, index) => [index + 1]);
+    executeMulti.mockResolvedValueOnce([
+      {
+        columns: ["id"],
+        rows,
+        affected_rows: 28,
+        execution_time_ms: 1,
+        has_more: true,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("sqlserver-1", "app", "Query");
+    const sql = "SELECT a.id, b.* FROM orders a JOIN order_details b ON b.order_id = a.id";
+
+    await store.executeTabSql(tabId, sql);
+    expect(executeMulti).toHaveBeenCalledTimes(1);
+
+    await store.executeTabSql(tabId, sql, {
+      resultBaseSql: sql,
+      pagination: { limit: 25, offset: 28 },
+      appendResult: { maxRows: 10_000 },
+      preserveResultDuringExecution: true,
+      preserveTotalRowCountDuringExecution: true,
+      replaceActiveResultInGroup: true,
+    });
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(executeMulti).toHaveBeenCalledTimes(1);
+    expect(tab.result?.rows).toEqual(rows);
+    expect(tab.result?.has_more).toBe(false);
   });
 });

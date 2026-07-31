@@ -40,6 +40,7 @@ import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedV
 import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
 import { agentDriverInstallKey, appendAgentDriverUpdateHint, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState, type DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
@@ -97,6 +98,8 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
 import { buildElasticsearchExternalConfig, elasticsearchConnectionModeFromConfig, elasticsearchConnectivityCheckPathFromConfig, elasticsearchKibanaBasePathFromConfig, type ElasticsearchConnectionMode } from "@/lib/connection/elasticsearchKibanaProxy";
+import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
+import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 
 type DbOption = { value: string; label: string };
 type DbCategoryKey = "sql" | "analytics" | "domestic" | "lightweight" | "document" | "graph_ai" | "timeseries" | "mq" | "registry_config";
@@ -254,6 +257,7 @@ const defaultForm = (): ConnectionForm => ({
   external_config: undefined,
   init_script: undefined,
   read_only: false,
+  show_system_schemas: false,
   is_production: false,
   production_databases: [],
   visible_databases: undefined,
@@ -448,6 +452,23 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 
 const form = ref(defaultForm());
 const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const showGaussdbConnectionMode = computed(() => form.value.db_type === "gaussdb");
+const gaussdbDriverMode = computed<GaussdbConnectionMode>({
+  get: () => gaussdbConnectionMode(form.value),
+  set: (mode) => {
+    setGaussdbConnectionMode(form.value, mode);
+    resetTestState();
+  },
+});
+const isGaussdbMJdbcConnection = computed(() => gaussdbDriverMode.value === "m-jdbc");
+const showGaussdbIdentifierQuoteStyle = computed(() => supportsGaussdbIdentifierQuoteStyle(form.value));
+const gaussdbQuoteStyle = computed<GaussdbIdentifierQuoteStyle>({
+  get: () => gaussdbIdentifierQuoteStyle(form.value),
+  set: (style) => {
+    setGaussdbIdentifierQuoteStyle(form.value, style);
+    resetTestState();
+  },
+});
 
 function resizeNoteTextarea() {
   const textarea = noteTextareaRef.value;
@@ -532,6 +553,7 @@ const hiveKrb5ConfPath = ref("");
 const hiveJaasConfigPath = ref("");
 const hiveUseSubjectCredsOnlyFalse = ref(false);
 const hiveExtraJavaOptions = ref("");
+const damengJvmOptions = ref("");
 const dialogStep = ref<DialogStep>("select");
 const dbPickerView = ref<DbPickerView>(loadConnectionPickerView());
 const dbSearchQuery = ref("");
@@ -826,6 +848,14 @@ const driverProfiles: Record<
     label: "Elasticsearch",
     icon: "elasticsearch",
   },
+  easysearch: {
+    type: "easysearch",
+    port: 9200,
+    user: "",
+    label: "Easysearch",
+    icon: "easysearch",
+  },
+  hbase: { type: "hbase", port: 8080, user: "", label: "Apache HBase", icon: "hbase" },
   qdrant: { type: "qdrant", port: 6333, user: "", label: "Qdrant", icon: "qdrant" },
   milvus: { type: "milvus", port: 19530, user: "root", label: "Milvus", icon: "milvus" },
   weaviate: { type: "weaviate", port: 8080, user: "", label: "Weaviate", icon: "weaviate" },
@@ -1179,6 +1209,10 @@ function resetHiveKerberosFields(config?: Pick<ConnectionConfig, "url_params" | 
   hiveExtraJavaOptions.value = kerberos.extraJavaOptions;
 }
 
+function resetDamengJvmOptions(config?: Pick<ConnectionConfig, "agent_java_options">) {
+  damengJvmOptions.value = damengJvmSystemPropertiesText(config?.agent_java_options);
+}
+
 function buildInfluxDbExternalConfig(): InfluxDbExternalConfig {
   if (influxDbVersion.value !== "2") return { version: "1" };
   const org = influxDbOrg.value.trim();
@@ -1468,7 +1502,7 @@ function finishAgentDriverInstall() {
 function failAgentDriverInstall(error: unknown) {
   agentInstallOperationId.value = null;
   agentInstallRunning.value = false;
-  agentInstallError.value = errorMessage(error);
+  agentInstallError.value = translateBackendError(t, errorMessage(error));
   showAgentInstallDialog.value = true;
 }
 
@@ -1544,6 +1578,17 @@ async function ensureRequiredJdbcxDriverInstalled(config: ConnectionConfig): Pro
   if (result.paths.length > 0) {
     jdbcManualClasspathOpen.value = false;
   }
+}
+
+async function ensureRequiredGaussdbMJdbcRuntime(config: ConnectionConfig): Promise<void> {
+  if (gaussdbConnectionMode(config) !== "m-jdbc") return;
+  if (!(config.jdbc_driver_paths ?? []).length) {
+    throw new Error(t("connection.gaussdbMJdbcDriverRequired"));
+  }
+  const status = await api.jdbcPluginStatus();
+  if (status.installed && status.compatible) return;
+  testResult.value = { ok: true, message: t("connection.gaussdbMJdbcPluginInstalling") };
+  await api.installJdbcPlugin();
 }
 
 async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<boolean> {
@@ -1849,11 +1894,15 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     form.value.username = profile.user;
     form.value.url_params = profile.urlParams || "";
     form.value.agent_java_options = [];
+    damengJvmOptions.value = "";
     if (profile.host) {
       form.value.host = profile.host;
     }
     if (profile.type === "sqlite" || profile.type === "duckdb" || profile.type === "access") {
       form.value.host = "";
+    }
+    if (profile.type === "sqlite") {
+      form.value.database = undefined;
     }
     if (profile.type === "h2") {
       h2ConnectionMode.value = "file";
@@ -1947,7 +1996,7 @@ watch(
         name: config.name,
         note: config.note || "",
         db_type: oceanbasePatch?.db_type || profileConfig?.type || config.db_type,
-        driver_profile: oceanbasePatch?.driver_profile || profile,
+        driver_profile: oceanbasePatch?.driver_profile || config.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
         url_params: config.url_params || "",
         agent_java_options: config.agent_java_options || [],
@@ -1986,6 +2035,7 @@ watch(
         attached_databases: config.attached_databases || [],
         init_script: config.init_script,
         read_only: config.read_only || false,
+        show_system_schemas: config.show_system_schemas || false,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
         visible_databases: config.visible_databases,
@@ -2012,6 +2062,7 @@ watch(
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
       resetHiveKerberosFields(config.db_type === "hive" ? config : undefined);
+      resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
       selectedTransportLayerId.value = form.value.transport_layers?.[0]?.id || null;
@@ -2049,6 +2100,7 @@ watch(
       resetInfluxDbFields();
       resetElasticsearchProxyFields();
       resetHiveKerberosFields();
+      resetDamengJvmOptions();
       oceanbaseSubMode.value = "mysql";
       h2ConnectionMode.value = "file";
       dremioConnectionMode.value = "legacy";
@@ -2200,6 +2252,8 @@ const iconTypeMap: Record<string, string> = {
   sqlserver: "sqlserver",
   oracle: "oracle",
   elasticsearch: "elasticsearch",
+  easysearch: "easysearch",
+  hbase: "hbase",
   qdrant: "qdrant",
   milvus: "milvus",
   weaviate: "weaviate",
@@ -2279,6 +2333,8 @@ const dbOptions: DbOption[] = [
   { value: "sqlite", label: "SQLite" },
   { value: "sqlserver", label: "SQL Server" },
   { value: "elasticsearch", label: "Elasticsearch" },
+  { value: "easysearch", label: "Easysearch" },
+  { value: "hbase", label: "Apache HBase" },
   { value: "qdrant", label: "Qdrant" },
   { value: "milvus", label: "Milvus" },
   { value: "weaviate", label: "Weaviate" },
@@ -2315,6 +2371,7 @@ const dbOptions: DbOption[] = [
   { value: "gbase", label: "GBase" },
   { value: "kingbase", label: "KingBase" },
   { value: "highgo", label: "瀚高 HighGo" },
+  { value: "uxdb", label: "优炫 UXDB" },
   { value: "yashandb", label: "崖山 YashanDB" },
   { value: "vastbase", label: "Vastbase" },
   { value: "redshift", label: "Redshift" },
@@ -2369,7 +2426,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "domestic",
     titleKey: "connection.databaseCategoryDomestic",
-    optionValues: ["dm", "opengauss", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
+    optionValues: ["dm", "opengauss", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "uxdb", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
   },
   {
     key: "lightweight",
@@ -2379,7 +2436,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "document",
     titleKey: "connection.databaseCategoryDocument",
-    optionValues: ["mongodb", "redis", "elasticsearch", "manticoresearch", "cassandra"],
+    optionValues: ["mongodb", "redis", "elasticsearch", "easysearch", "hbase", "manticoresearch", "cassandra"],
   },
   {
     key: "graph_ai",
@@ -2494,10 +2551,10 @@ const sqliteExtensionPaths = computed({
     form.value.url_params = setSqliteExtensionPaths(form.value.url_params, value);
   },
 });
-const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "dameng", "redis", "etcd", "clickhouse", "elasticsearch", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
+const tlsCapableDatabaseTypes = new Set<DatabaseType>(["mysql", "starrocks", "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "dameng", "redis", "etcd", "clickhouse", "elasticsearch", "easysearch", "hbase", "qdrant", "milvus", "weaviate", "chromadb", "influxdb"]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse");
-const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch");
+const supportsGenericUrlParams = computed(() => form.value.db_type !== "manticoresearch" && form.value.db_type !== "hbase");
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
@@ -2767,11 +2824,11 @@ const testResultMessage = computed(() => {
 const agentInstallPercent = computed(() => driverInstallProgressPercent(agentInstallProgress.value));
 const agentInstallProgressLabel = computed(() => {
   const progress = agentInstallProgress.value;
-  if (agentInstallError.value) return "安装失败";
-  if (!agentInstallRunning.value) return "等待安装";
-  if (!progress) return "准备安装驱动...";
-  if (progress.step === "jre-extract") return "解压 JRE...";
-  const label = progress.step === "jre" ? "下载 JRE" : progress.step === "driver" ? "下载驱动" : progress.step || "安装驱动";
+  if (agentInstallError.value) return t("connection.driverInstall.statusFailed");
+  if (!agentInstallRunning.value) return t("connection.driverInstall.statusWaiting");
+  if (!progress) return t("connection.driverInstall.statusPreparing");
+  if (progress.step === "jre-extract") return t("connection.driverInstall.statusExtractingJre");
+  const label = progress.step === "jre" ? t("connection.driverInstall.stepJre") : progress.step === "driver" ? t("connection.driverInstall.stepDriver") : progress.step || t("connection.driverInstall.stepDefault");
   if (!progress.total) return `${label}...`;
   return `${label} ${formatInstallSize(progress.downloaded ?? 0)} / ${formatInstallSize(progress.total)} (${agentInstallPercent.value ?? 0}%)`;
 });
@@ -2879,6 +2936,7 @@ async function testConnection() {
   try {
     config = connectionConfigForSubmit(editingId.value || draftTestConnectionId.value);
     await ensureRequiredAgentDriverInstalled(config);
+    await ensureRequiredGaussdbMJdbcRuntime(config);
     await ensureRequiredJdbcxDriverInstalled(config);
     const result = await testConnectionWithTimeout(config, runId);
     if (runId !== testRunId) return;
@@ -3059,6 +3117,7 @@ function generateConnectionName(): string {
 function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionConfig {
   const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   config.database_info = undefined;
+  config.database = normalizeStoredConnectionDatabase(config.db_type, config.database);
   config.note = config.note?.trim() || undefined;
   if (selectedType.value === "oceanbase" && (config.driver_profile === "oceanbase" || config.driver_profile === "oceanbase-oracle")) {
     Object.assign(config, oceanbaseModeConnectionPatch(oceanbaseSubMode.value));
@@ -3133,6 +3192,15 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     });
     config.url_params = hiveKerberos.urlParams;
     config.agent_java_options = hiveKerberos.agentJavaOptions;
+  } else if (config.db_type === "dameng") {
+    try {
+      config.agent_java_options = parseDamengJvmSystemProperties(damengJvmOptions.value);
+    } catch (error) {
+      if (error instanceof DamengJvmSystemPropertyError) {
+        throw new Error(t("connection.damengJvmOptionsInvalid", { line: error.lineNumber }));
+      }
+      throw error;
+    }
   } else if (!(config.db_type === "jdbc" && config.driver_profile === JDBCX_DRIVER_PROFILE)) {
     config.agent_java_options = undefined;
   }
@@ -3196,6 +3264,10 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.external_config = buildElasticsearchExternalConfig(elasticsearchConnectionMode.value, elasticsearchKibanaBasePath.value, elasticsearchConnectivityCheckPath.value);
   } else if (config.db_type === "sqlserver") {
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
+  } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
+    const style = gaussdbIdentifierQuoteStyle(config);
+    config.external_config = undefined;
+    setGaussdbIdentifierQuoteStyle(config, style);
   } else {
     config.external_config = undefined;
   }
@@ -3230,6 +3302,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.redis_cluster_nodes = undefined;
     config.redis_key_separator = undefined;
     config.redis_scan_page_size = undefined;
+    config.redis_database_aliases = undefined;
   } else if (config.redis_connection_mode === "sentinel") {
     config.redis_sentinel_master = config.redis_sentinel_master?.trim() || "";
     config.redis_sentinel_nodes = normalizeRedisSentinelNodes(config.redis_sentinel_nodes || "");
@@ -3300,7 +3373,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
   }
-  if (jdbcBackedDatabaseTypes.has(config.db_type)) {
+  if (jdbcBackedDatabaseTypes.has(config.db_type) || gaussdbConnectionMode(config) === "m-jdbc") {
     if (config.db_type === "jdbc") {
       if (config.driver_profile === "dremio") {
         applyDremioJdbcMetadata(config);
@@ -3318,12 +3391,19 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
       config.connection_string = undefined;
       config.jdbc_driver_class = config.jdbc_driver_class?.trim() || "io.prestosql.jdbc.PrestoDriver";
       applyPrestoSqlBuiltinDriverPathsIfAvailable();
+    } else if (config.db_type === "gaussdb") {
+      config.connection_string = undefined;
+      config.jdbc_driver_class = GAUSSDB_M_JDBC_DRIVER_CLASS;
     }
     config.jdbc_driver_class = config.jdbc_driver_class?.trim() || undefined;
     config.jdbc_driver_paths = jdbcDriverPathsInput.value
       .split(/\r?\n/)
       .map((path) => path.trim())
       .filter(Boolean);
+  } else if (config.db_type === "gaussdb") {
+    config.connection_string = undefined;
+    config.jdbc_driver_class = undefined;
+    config.jdbc_driver_paths = [];
   }
   if (config.db_type === "h2") {
     const h2Mode = connectionUrlInput.value.trim() ? h2ConnectionModeForConfig(config) : h2ConnectionMode.value;
@@ -3369,6 +3449,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   } else {
     config.visible_databases = Array.isArray(config.visible_databases) && config.visible_databases.length > 0 ? config.visible_databases : undefined;
   }
+  if (!config.show_system_schemas) config.show_system_schemas = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
   return config as ConnectionConfig;
@@ -3895,9 +3976,13 @@ async function copyConnectionErrorDetail() {
   }
 }
 
+function openJdbcDriverManager() {
+  emit("openDriverStore", { target: "tab", tab: "jdbc" });
+}
+
 function openJdbcDriverManagerFromError() {
   showConnectionErrorDialog.value = false;
-  emit("openDriverStore", { target: "tab", tab: "jdbc" });
+  openJdbcDriverManager();
 }
 
 function resetForm() {
@@ -4223,11 +4308,13 @@ async function save() {
     if (editingId.value) {
       const updated = withSavedDatabaseInfo(connectionConfigForSubmit(editingId.value), databaseInfoForSave);
       await ensureRequiredAgentDriverInstalled(updated);
+      await ensureRequiredGaussdbMJdbcRuntime(updated);
       await store.updateConnection(updated);
       store.stopEditing();
     } else {
       const config = withSavedDatabaseInfo(connectionConfigForSubmit(draftTestConnectionId.value), databaseInfoForSave);
       await ensureRequiredAgentDriverInstalled(config);
+      await ensureRequiredGaussdbMJdbcRuntime(config);
       await store.addConnection(config);
       draftTestConnectionId.value = uuid();
       if (config.db_type === "jdbc") {
@@ -4707,7 +4794,7 @@ function openExternalUrl(url: string) {
                     :key="opt.value"
                     type="button"
                     class="connection-db-picker-option group flex min-h-24 flex-col items-center justify-center gap-2 rounded-[4px] border bg-background/70 p-3 text-center transition hover:border-primary/40 hover:bg-muted/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'connection-db-picker-option--selected shadow-sm' : 'border-border'"
+                    :class="selectedType === opt.value ? 'dbx-tile-selected shadow-sm' : 'border-border'"
                     :aria-pressed="selectedType === opt.value"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
@@ -4725,7 +4812,7 @@ function openExternalUrl(url: string) {
                     :key="opt.value"
                     type="button"
                     class="connection-db-picker-option flex items-center gap-3 rounded-[4px] border bg-background px-3 py-2 text-left transition hover:border-primary/40 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    :class="selectedType === opt.value ? 'connection-db-picker-option--selected' : 'border-border'"
+                    :class="selectedType === opt.value ? 'dbx-tile-selected' : 'border-border'"
                     :aria-pressed="selectedType === opt.value"
                     @click="onDbTypeChange(opt.value)"
                     @dblclick="goToConnectionStep(opt.value)"
@@ -4768,8 +4855,8 @@ function openExternalUrl(url: string) {
               </TabsList>
             </div>
 
-            <TabsContent value="connection" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2 pb-2">
+            <TabsContent value="connection" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div class="connection-form-body grid min-h-0 flex-1 gap-4 overflow-y-auto pt-4 pr-2 pb-2">
                 <div v-if="!isJdbcConnection && form.db_type !== 'nacos'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
@@ -4852,7 +4939,7 @@ function openExternalUrl(url: string) {
                       <PopoverContent class="w-auto p-2">
                         <div class="flex items-center gap-2">
                           <input type="color" :value="form.color" @input="handleCustomColorPicked(($event.target as HTMLInputElement).value)" class="h-6 w-6 cursor-pointer rounded border-0 p-0" />
-                          <Input type="text" :value="customColorInput || form.color" @input="handleCustomColorInput(($event.target as HTMLInputElement).value)" class="w-28 h-7 text-xs font-mono" :placeholder="'#ff0000 或 rgba(…)'" />
+                          <Input type="text" :value="customColorInput || form.color" @input="handleCustomColorInput(($event.target as HTMLInputElement).value)" class="w-28 h-7 text-xs font-mono" :placeholder="t('connection.customColorPlaceholder')" />
                         </div>
                       </PopoverContent>
                     </Popover>
@@ -5082,11 +5169,11 @@ function openExternalUrl(url: string) {
                   </div>
                   <template v-if="form.db_type === 'h2' || form.db_type === 'access'">
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">{{ t("connection.user") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.user") }}{{ form.db_type === "access" ? t("connection.optionalSuffix") : "" }}</Label>
                       <Input v-model="form.username" class="col-span-3" :placeholder="form.db_type === 'access' ? '' : 'sa'" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
-                      <Label :class="connectionLabelClass">{{ t("connection.password") }}{{ form.db_type === "access" ? "（可选）" : "" }}</Label>
+                      <Label :class="connectionLabelClass">{{ t("connection.password") }}{{ form.db_type === "access" ? t("connection.optionalSuffix") : "" }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
                   </template>
@@ -5795,12 +5882,12 @@ function openExternalUrl(url: string) {
                 <template v-else-if="form.db_type === 'turso'">
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
-                    <Input v-model="form.host" class="col-span-3" placeholder="your-database.turso.io 或 libsql://your-database.turso.io" />
+                    <Input v-model="form.host" class="col-span-3" :placeholder="t('connection.tursoHostPlaceholder')" />
                   </div>
 
                   <div class="grid grid-cols-4 items-start gap-4">
                     <span />
-                    <p class="col-span-3 text-xs text-muted-foreground">支持 libsql:// 或 https:// 协议，也可以只填主机名（自动使用 HTTPS）</p>
+                    <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.tursoHostHint") }}</p>
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -5810,12 +5897,12 @@ function openExternalUrl(url: string) {
 
                   <div class="grid grid-cols-4 items-start gap-4">
                     <span />
-                    <p class="col-span-3 text-xs text-muted-foreground">使用 <code class="px-1 py-0.5 rounded bg-muted text-xs">turso db tokens create &lt;database-name&gt;</code> 创建 token</p>
+                    <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.tursoTokenHint") }} <code class="px-1 py-0.5 rounded bg-muted text-xs">turso db tokens create &lt;database-name&gt;</code></p>
                   </div>
 
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
-                    <Input v-model="form.url_params" class="col-span-3" placeholder="authToken=xxx（可选，优先使用上面的 Token 字段）" />
+                    <Input v-model="form.url_params" class="col-span-3" :placeholder="t('connection.tursoUrlParamsPlaceholder')" />
                   </div>
                 </template>
 
@@ -5901,7 +5988,7 @@ function openExternalUrl(url: string) {
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'hbase'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                     <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                   </div>
@@ -6076,6 +6163,20 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
 
+                  <div v-if="form.db_type === 'dameng'" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.damengJvmOptions") }}</Label>
+                    <div class="col-span-3 space-y-1.5">
+                      <textarea
+                        v-model="damengJvmOptions"
+                        class="min-h-16 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        :placeholder="t('connection.damengJvmOptionsPlaceholder')"
+                      />
+                      <p class="text-xs leading-5 text-muted-foreground">
+                        {{ t("connection.damengJvmOptionsHint") }}
+                      </p>
+                    </div>
+                  </div>
+
                   <template v-if="isPrestoSqlConnection">
                     <div class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelTopClass">{{ t("connection.jdbcDriverPaths") }}</Label>
@@ -6193,8 +6294,8 @@ function openExternalUrl(url: string) {
               </div>
             </TabsContent>
 
-            <TabsContent v-if="supportsTlsToggle" value="tls" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2">
+            <TabsContent v-if="supportsTlsToggle" value="tls" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div class="connection-form-body grid min-h-0 flex-1 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2">
                 <div v-if="!supportsPostgresTlsOptions && !supportsMysqlTlsOptions" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">SSL/TLS</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
@@ -6493,8 +6594,78 @@ function openExternalUrl(url: string) {
               </div>
             </TabsContent>
 
-            <TabsContent value="advanced" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto pt-4 pr-2">
+            <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div class="connection-form-body grid min-h-0 flex-1 gap-4 overflow-y-auto pt-4 pr-2">
+                <div v-if="showGaussdbConnectionMode" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbConnectionMode") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbDriverMode">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="native">{{ t("connection.gaussdbConnectionModeNative") }}</SelectItem>
+                        <SelectItem value="m-jdbc">{{ t("connection.gaussdbConnectionModeMJdbc") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">
+                      {{ isGaussdbMJdbcConnection ? t("connection.gaussdbConnectionModeMJdbcHint") : t("connection.gaussdbConnectionModeNativeHint") }}
+                    </p>
+                  </div>
+                </div>
+                <div v-if="isGaussdbMJdbcConnection" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbMJdbcDriver") }}</Label>
+                  <div class="col-span-3 space-y-2">
+                    <Select v-if="jdbcDriverSelectItems.length > 0" :model-value="selectedJdbcDriverPath" @update:model-value="onJdbcDriverSelect">
+                      <SelectTrigger class="h-9">
+                        <SelectValue :placeholder="t('connection.jdbcDriverSelectPlaceholder')" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="driver in jdbcDriverSelectItems" :key="driver.id" :value="driver.id">
+                          {{ driver.label }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <div class="flex items-start gap-1">
+                      <textarea
+                        v-model="jdbcDriverPathsInput"
+                        class="flex min-h-12 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        :placeholder="t('connection.gaussdbMJdbcDriverPlaceholder')"
+                      />
+                      <Tooltip v-if="isDesktop">
+                        <TooltipTrigger as-child>
+                          <Button type="button" variant="outline" size="icon" class="h-9 w-9 shrink-0" @click="browseJdbcDriverPaths">
+                            <FolderOpen class="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{{ t("connection.jdbcDriverBrowse") }}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <div class="flex items-center justify-between gap-3">
+                      <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.gaussdbMJdbcDriverHint") }}</p>
+                      <Button type="button" variant="outline" size="sm" class="shrink-0" @click="openJdbcDriverManager">
+                        <FolderOpen class="h-3.5 w-3.5" />
+                        {{ t("toolbar.driverManager") }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="showGaussdbIdentifierQuoteStyle" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbIdentifierQuoteStyle") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbQuoteStyle">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">{{ t("connection.gaussdbIdentifierQuoteAuto") }}</SelectItem>
+                        <SelectItem value="double">{{ t("connection.gaussdbIdentifierQuoteDouble") }}</SelectItem>
+                        <SelectItem value="backtick">{{ t("connection.gaussdbIdentifierQuoteBacktick") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.gaussdbIdentifierQuoteHint") }}</p>
+                  </div>
+                </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
                   <Input v-model.number="form.connect_timeout_secs" type="number" min="1" max="300" step="1" class="col-span-3" />
@@ -6519,6 +6690,13 @@ function openExternalUrl(url: string) {
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="form.read_only" class="mr-0" />
                     <span class="text-xs text-muted-foreground">{{ t("connection.readOnlyHint") }}</span>
+                  </label>
+                </div>
+                <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.showSystemSchemas") }}</Label>
+                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
+                    <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
                   </label>
                 </div>
                 <div class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
@@ -6573,8 +6751,8 @@ function openExternalUrl(url: string) {
               </div>
             </TabsContent>
 
-            <TabsContent v-if="canUseTransportLayers" value="transport" class="m-0 min-h-0 flex-1 overflow-hidden">
-              <div class="connection-form-body grid h-full min-h-0 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2">
+            <TabsContent v-if="canUseTransportLayers" value="transport" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div class="connection-form-body grid min-h-0 flex-1 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2">
                 <div class="connection-label-wide-grid grid min-w-0 grid-cols-4 items-start gap-4">
                   <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.sshHops") }}</Label>
                   <div class="col-span-3 grid min-w-0 gap-3">
@@ -6857,7 +7035,7 @@ function openExternalUrl(url: string) {
   <Dialog :open="showAgentInstallDialog" @update:open="setAgentInstallDialogOpen">
     <DialogContent class="sm:max-w-[520px]" @interact-outside.prevent @escape-key-down.prevent>
       <DialogHeader>
-        <DialogTitle>{{ agentInstallError ? "驱动安装失败" : "正在安装驱动" }}</DialogTitle>
+        <DialogTitle>{{ agentInstallError ? t("connection.driverInstall.failedTitle") : t("connection.driverInstall.installingTitle") }}</DialogTitle>
       </DialogHeader>
 
       <div class="space-y-4">
@@ -6875,7 +7053,7 @@ function openExternalUrl(url: string) {
         </div>
 
         <div v-if="agentInstallError" class="space-y-2">
-          <div class="text-sm font-medium text-destructive">完整错误</div>
+          <div class="text-sm font-medium text-destructive">{{ t("connection.driverInstall.fullError") }}</div>
           <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ agentInstallError }}</pre>
         </div>
       </div>
@@ -6883,10 +7061,10 @@ function openExternalUrl(url: string) {
       <DialogFooter class="gap-2">
         <Button v-if="agentInstallError" variant="outline" @click="copyAgentInstallError">
           <Copy class="mr-1.5 h-3.5 w-3.5" />
-          复制错误
+          {{ t("connection.copyError") }}
         </Button>
         <Button :disabled="!canCloseAgentInstallDialog" @click="showAgentInstallDialog = false">
-          {{ agentInstallError ? "关闭" : "安装中..." }}
+          {{ agentInstallError ? t("common.close") : t("connection.driverInstall.installingButton") }}
         </Button>
       </DialogFooter>
     </DialogContent>
@@ -6895,11 +7073,11 @@ function openExternalUrl(url: string) {
   <Dialog v-model:open="showConnectionErrorDialog">
     <DialogContent class="sm:max-w-[560px]">
       <DialogHeader>
-        <DialogTitle>连接失败</DialogTitle>
+        <DialogTitle>{{ t("connection.connectFailedTitle") }}</DialogTitle>
       </DialogHeader>
 
       <div class="space-y-2">
-        <div class="text-sm text-muted-foreground">完整错误信息</div>
+        <div class="text-sm text-muted-foreground">{{ t("connection.fullErrorMessage") }}</div>
         <pre class="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 p-3 text-xs leading-5 text-destructive">{{ connectionErrorDetail }}</pre>
       </div>
 
@@ -6910,9 +7088,9 @@ function openExternalUrl(url: string) {
         </Button>
         <Button variant="outline" @click="copyConnectionErrorDetail">
           <Copy class="mr-1.5 h-3.5 w-3.5" />
-          复制错误
+          {{ t("connection.copyError") }}
         </Button>
-        <Button @click="showConnectionErrorDialog = false">关闭</Button>
+        <Button @click="showConnectionErrorDialog = false">{{ t("common.close") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
@@ -7132,30 +7310,8 @@ function openExternalUrl(url: string) {
   color: var(--foreground);
 }
 
-.connection-db-picker-option--selected {
-  border-color: rgb(23, 23, 23);
-  background-color: rgba(23, 23, 23, 0.08);
-  box-shadow: 0 0 0 1px rgba(23, 23, 23, 0.24);
-  color: rgb(10, 10, 10);
-}
-
-.connection-db-picker-option--selected:hover {
-  background-color: rgba(23, 23, 23, 0.12);
-}
-
 .connection-config-step :is([data-slot="input"], [data-slot="select-trigger"], [data-slot="tabs-list"], [data-slot="tabs-trigger"], textarea) {
   border-radius: var(--dbx-radius-fixed-4, 4px);
-}
-
-.dark .connection-db-picker-option--selected {
-  border-color: rgb(208, 208, 214);
-  background-color: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22);
-  color: rgb(221, 221, 226);
-}
-
-.dark .connection-db-picker-option--selected:hover {
-  background-color: rgba(255, 255, 255, 0.12);
 }
 
 .connection-dialog-content[data-wide="true"] .grid.grid-cols-4 {
