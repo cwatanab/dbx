@@ -1,3 +1,5 @@
+import { normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
+
 /**
  * Minimal shape of a translate function, satisfied by both `useI18n().t` inside
  * components and `i18n.global.t` in stores and composables. Using the full
@@ -64,7 +66,6 @@ const patterns: [RegExp, string][] = [
   [/^Unsupported SOCKS bound address type: (\d+)$/, "settings.tunnelsSocksUnsupportedAddrType"],
 
   // Query result export limits (crates/dbx-core/src/query_result_export.rs)
-  [/^XLSX supports at most ([\d,]+) data rows\. Use CSV export for the full result\.$/, "exportProgress.xlsxRowLimit"],
   [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
   [/^Streaming export needs a result-set session, but this driver returned no session_id\.$/, "exportProgress.agentSessionMissing"],
 
@@ -105,7 +106,6 @@ const paramNames: Record<string, string | string[]> = {
   "settings.tunnelsSocksUnsupportedAuth": "method",
   "settings.tunnelsSocksConnectRejected": "code",
   "settings.tunnelsSocksUnsupportedAddrType": "type",
-  "exportProgress.xlsxRowLimit": "limit",
   "driverStore.jreDirRemoveFailedWindows": ["path", "error"],
   "driverStore.jreDirRemoveFailed": ["path", "error"],
   "driverStore.jreInUseByDrivers": ["jre", "drivers"],
@@ -120,7 +120,17 @@ function backendErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function translateStructuredBackendError(t: BackendErrorTranslate, error: BackendError): string {
+  const translated = t(error.messageKey, error.messageParams);
+  const summary = translated !== error.messageKey ? translated : t("backendErrors.unknown");
+  const detail = error.detail?.trim();
+  return detail && detail !== summary ? `${summary}\n\n${detail}` : summary;
+}
+
 export function translateBackendError(t: BackendErrorTranslate, error: unknown): string {
+  const structured = normalizeBackendError(error);
+  if (structured) return translateStructuredBackendError(t, structured);
+
   const message = backendErrorMessage(error);
   const tagged = message.match(/^\[([A-Za-z][A-Za-z0-9]+)\]\s*([\s\S]*)$/);
   if (tagged) {
