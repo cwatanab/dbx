@@ -47,7 +47,7 @@ type CommitEditResult =
 
 interface CommitEditOptions {
   promoteDraft?: boolean;
-  explicitValue?: string | null;
+  explicitValue?: CellValue;
 }
 
 type GridScrollerRef =

@@ -16,6 +16,11 @@ import (
 
 const metadataTimeout = 15 * time.Second
 
+const (
+	kingbaseListDatabasesSQL         = "SELECT datname FROM sys_catalog.sys_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1') ORDER BY datname"
+	kingbaseListDatabasesPostgresSQL = "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1') ORDER BY datname"
+)
+
 // Escape '_' so only Kingbase internal SYS_/XLOG_ prefixes are hidden; names
 // such as SYSTEMS and SYSLOG may be user-created schemas in MySQL mode.
 const kingbaseMySQLCompatListSchemasSQL = `SELECT schema_name FROM information_schema.schemata WHERE UPPER(schema_name) <> 'INFORMATION_SCHEMA' AND UPPER(schema_name) NOT LIKE 'SYS\_%' ESCAPE '\' AND UPPER(schema_name) NOT LIKE 'XLOG\_%' ESCAPE '\' ORDER BY schema_name`
@@ -191,8 +196,8 @@ func (s *server) connectionInfo() (map[string]any, error) {
 
 func (s *server) listDatabases() ([]databaseInfo, error) {
 	queries := []string{
-		"SELECT datname FROM sys_catalog.sys_database WHERE NOT datistemplate AND datallowconn ORDER BY datname",
-		"SELECT datname FROM pg_catalog.pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname",
+		kingbaseListDatabasesSQL,
+		kingbaseListDatabasesPostgresSQL,
 		"SELECT current_database()",
 	}
 	for _, query := range queries {
@@ -539,24 +544,46 @@ func isUndefinedColumn(err error, columnName string) bool {
 }
 
 func (s *server) informationSchemaColumns(schema, table string, primary map[string]bool) ([]columnInfo, error) {
-	result, err := s.queryInformationSchemaColumns(schema, table, primary, true)
-	if err != nil && isUndefinedColumn(err, "column_type") {
-		return s.queryInformationSchemaColumns(schema, table, primary, false)
+	// Cache the optional information_schema capabilities for this connection so
+	// subsequent table metadata requests do not repeat known failing probes.
+	includeColumnType := !s.infoColumnTypeUnsupported
+	includeUdtName := !s.infoUdtNameUnsupported
+	for {
+		result, err := s.queryInformationSchemaColumns(schema, table, primary, includeColumnType, includeUdtName)
+		if err == nil {
+			return result, nil
+		}
+		switch {
+		case includeColumnType && isUndefinedColumn(err, "column_type"):
+			includeColumnType = false
+			s.infoColumnTypeUnsupported = true
+		case includeUdtName && isUndefinedColumn(err, "udt_name"):
+			includeUdtName = false
+			s.infoUdtNameUnsupported = true
+		default:
+			return nil, err
+		}
 	}
-	return result, err
 }
 
-func (s *server) queryInformationSchemaColumns(schema, table string, primary map[string]bool, includeFullDataType bool) ([]columnInfo, error) {
-	fullDataTypeExpression := `CASE
+func (s *server) queryInformationSchemaColumns(schema, table string, primary map[string]bool, includeColumnType, includeUdtName bool) ([]columnInfo, error) {
+	var fullDataTypeExpression string
+	switch {
+	case includeColumnType && includeUdtName:
+		fullDataTypeExpression = `CASE
 	WHEN UPPER(TRIM(c.data_type)) IN ('USER-DEFINED', 'USER_DEFINED')
 		AND UPPER(COALESCE(NULLIF(TRIM(c.column_type), ''), 'USER-DEFINED')) IN ('USER-DEFINED', 'USER_DEFINED')
 	THEN c.udt_name
 	ELSE c.column_type
 	END`
-	if !includeFullDataType {
+	case includeColumnType:
+		fullDataTypeExpression = "c.column_type"
+	case includeUdtName:
 		fullDataTypeExpression = `CASE
 		WHEN UPPER(TRIM(c.data_type)) IN ('USER-DEFINED', 'USER_DEFINED') THEN c.udt_name
 		END AS column_type`
+	default:
+		fullDataTypeExpression = "NULL AS column_type"
 	}
 	query := fmt.Sprintf(`SELECT c.column_name, c.data_type, %s, c.is_nullable, c.column_default,
 	col_description(a.attrelid, a.attnum), c.numeric_precision, c.numeric_scale, c.character_maximum_length
