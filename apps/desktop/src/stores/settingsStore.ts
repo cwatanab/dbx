@@ -5,7 +5,7 @@ import { generateId, getConfigKey, aiConfigToItem } from "@/lib/ai/aiConfigList"
 import { normalizeColumnFormatter, normalizeCustomColumnFormatter, normalizeGlobalDateTimePattern, type ColumnFormatterConfig, type CustomColumnFormatterConfig } from "@/lib/dataGrid/columnFormatter";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
-import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyExtractorId, normalizeDataGridExtractorOptions, type DataGridCopyExtractorId, type DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, type DataGridCopyPreference, type DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
@@ -469,12 +469,13 @@ export interface EditorSettings {
   mongoViewMode: "document" | "table";
   showColumnCommentsInHeader: boolean;
   showColumnTypesInHeader: boolean;
+  showIndexIndicatorsInHeader: boolean;
   compactColumnHeaderActions: boolean;
   columnWidthDensity: ColumnWidthDensity;
   dataGridQuickEntry: boolean;
   dataGridRenderMode: DataGridRenderMode;
   dataGridSearchMode: DataGridSearchMode;
-  dataGridCopyExtractor: DataGridCopyExtractorId;
+  dataGridCopyExtractor: DataGridCopyPreference;
   dataGridExtractorOptions: DataGridExtractorOptions;
   resultRunDisplayMode: ResultRunDisplayMode;
   dataGridAutoTransposeSingleRow: boolean;
@@ -647,12 +648,13 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   mongoViewMode: "document",
   showColumnCommentsInHeader: true,
   showColumnTypesInHeader: true,
+  showIndexIndicatorsInHeader: true,
   compactColumnHeaderActions: true,
   columnWidthDensity: "standard",
   dataGridQuickEntry: false,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
-  dataGridCopyExtractor: "tsv",
+  dataGridCopyExtractor: "smart",
   dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
   resultRunDisplayMode: "tabs",
   dataGridAutoTransposeSingleRow: false,
@@ -684,7 +686,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   prefillNewQueryWithSelect: true,
   updateNotificationsEnabled: true,
   sidebarHiddenTablePrefixes: [],
-  sidebarObjectInfoMode: "comment-aligned",
+  sidebarObjectInfoMode: "comment-inline",
   sidebarAllowHorizontalScroll: false,
   columnFormatters: {},
   customColumnFormatters: {},
@@ -956,12 +958,13 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
     showColumnCommentsInHeader: settings.showColumnCommentsInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader,
     showColumnTypesInHeader: settings.showColumnTypesInHeader ?? DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader,
+    showIndexIndicatorsInHeader: settings.showIndexIndicatorsInHeader ?? DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader,
     compactColumnHeaderActions: settings.compactColumnHeaderActions ?? DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions,
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
-    dataGridCopyExtractor: normalizeDataGridCopyExtractorId(settings.dataGridCopyExtractor),
+    dataGridCopyExtractor: normalizeDataGridCopyPreference(settings.dataGridCopyExtractor),
     dataGridExtractorOptions: normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions),
     resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
     dataGridAutoTransposeSingleRow: settings.dataGridAutoTransposeSingleRow === true,
@@ -1449,12 +1452,13 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.mongoViewMode !== undefined) editorSettings.value.mongoViewMode = partial.mongoViewMode;
     if (partial.showColumnCommentsInHeader !== undefined) editorSettings.value.showColumnCommentsInHeader = partial.showColumnCommentsInHeader;
     if (partial.showColumnTypesInHeader !== undefined) editorSettings.value.showColumnTypesInHeader = partial.showColumnTypesInHeader;
+    if (partial.showIndexIndicatorsInHeader !== undefined) editorSettings.value.showIndexIndicatorsInHeader = partial.showIndexIndicatorsInHeader;
     if (partial.compactColumnHeaderActions !== undefined) editorSettings.value.compactColumnHeaderActions = partial.compactColumnHeaderActions;
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
-    if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyExtractorId(partial.dataGridCopyExtractor);
+    if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyPreference(partial.dataGridCopyExtractor);
     if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
     if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
     if (partial.dataGridAutoTransposeSingleRow !== undefined) editorSettings.value.dataGridAutoTransposeSingleRow = partial.dataGridAutoTransposeSingleRow === true;
