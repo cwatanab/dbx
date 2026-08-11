@@ -530,6 +530,7 @@ async fn fetch_table_export_batch(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         });
     }
 
@@ -2626,7 +2627,7 @@ mod tests {
         )
         .await;
 
-        let export = run_external_driver_export(&fixture);
+        let export = Box::pin(run_external_driver_export(&fixture));
         let cancel = async {
             wait_for_external_driver_call(&fixture.calls, "executeQueryPage").await;
             set_export_cancelled(&fixture.request.export_id).await;
@@ -2665,7 +2666,7 @@ mod tests {
         )
         .await;
 
-        let export = run_external_driver_export(&fixture);
+        let export = Box::pin(run_external_driver_export(&fixture));
         let cancel = async {
             wait_for_external_driver_call(&fixture.calls, "fetchQueryPage").await;
             set_export_cancelled(&fixture.request.export_id).await;

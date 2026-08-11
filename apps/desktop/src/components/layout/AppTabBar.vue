@@ -47,7 +47,7 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const tabDrag = useTabDrag((draggedId, targetId, position) => {
-  queryStore.reorderTab(draggedId, targetId, position);
+  return queryStore.reorderTab(draggedId, targetId, position);
 });
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
@@ -478,13 +478,15 @@ function tabColorStyle(tab: QueryTab) {
 
   if (isClassic) {
     return {
-      backgroundColor: hexToRgba(color, isActive ? 0.16 : 0.07),
+      "--app-tab-background": hexToRgba(color, isActive ? 0.16 : 0.07),
+      "--app-tab-hover-background": hexToRgba(color, 0.14),
       boxShadow: isActive ? `inset 0 -2px 0 ${color}` : undefined,
     };
   }
 
   return {
-    backgroundColor: hexToRgba(color, isActive ? 0.16 : 0.09),
+    "--app-tab-background": hexToRgba(color, isActive ? 0.16 : 0.09),
+    "--app-tab-hover-background": hexToRgba(color, 0.16),
     borderColor: isActive ? hexToRgba(color, 0.72) : hexToRgba(color, 0.18),
   };
 }
@@ -523,7 +525,8 @@ function tabMenuIcon(tab: QueryTab) {
   if (tab.externalSqlFileMissing) return AlertTriangle;
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
   if (tab.mode === "vector") return TableProperties;
-  if (tab.mode === "etcd" || tab.mode === "zookeeper") return KeyRound;
+  if (tab.mode === "etcd" || tab.mode === "zookeeper" || tab.mode === "consul") return KeyRound;
+  if (tab.mode === "consul-overview") return Gauge;
   if (tab.mode === "etcd-dashboard") return Gauge;
   if (tab.mode === "etcd-access-control") return ShieldCheck;
   if (tab.mode === "nacos") return Network;
@@ -536,7 +539,7 @@ function tabMenuIcon(tab: QueryTab) {
 }
 
 function handleTabClick(tab: QueryTab) {
-  if (tabDrag.state.wasDragged) return;
+  if (tabDrag.state.suppressClick) return;
   activateTab(tab.id);
 }
 
@@ -644,7 +647,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -669,7 +672,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
@@ -722,7 +726,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-settings-page-tab
-                class="app-tab-pill group flex min-w-36 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-36 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
@@ -749,7 +753,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
             <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
               <div
                 data-driver-store-tab
-                class="app-tab-pill group flex min-w-38 items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap"
+                class="app-tab-pill group flex min-w-38 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap"
                 :class="
                   isClassicLayout
                     ? ['h-full border-r border-border/80 dark:border-border/45 font-medium', driverStoreActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
@@ -840,7 +844,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
               <Tooltip>
                 <TooltipTrigger as-child>
                   <div
-                    class="app-tab-pill group flex items-center gap-1 px-2 text-xs cursor-pointer transition-colors whitespace-nowrap select-none"
+                    class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
                     :class="
                       isClassicLayout
                         ? [
@@ -865,7 +869,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                       <Table2 v-else-if="tab.mode === 'data' || tab.mode === 'mongo' || tab.mode === 'redis' || tab.mode === 'hbase'" class="h-3.5 w-3.5" />
                       <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                       <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper'" class="h-3.5 w-3.5" />
+                      <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                      <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
                       <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                       <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
                       <Network v-else-if="tab.mode === 'nacos'" class="h-3.5 w-3.5" />
@@ -1009,9 +1014,9 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       </div>
       <DialogFooter class="min-w-0 sm:flex-wrap">
         <Button variant="outline" @click="handleCancelClose">{{ t("common.cancel") }}</Button>
-        <Button v-if="showCloseConfirmBulkActions" variant="secondary" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
+        <Button v-if="showCloseConfirmBulkActions" variant="secondary" class="border-border" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>
-        <Button variant="secondary" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
+        <Button variant="secondary" class="border-border" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
         <Button @click="handleSaveAndClose">{{ t("savedSql.save") }}</Button>
       </DialogFooter>
     </DialogContent>
@@ -1056,6 +1061,14 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 /* 经典布局下 h-full 在 height:auto 容器中失效，改为固定高度 */
 .app-tab-scroll.classic-wrap > div {
   height: 2rem;
+}
+
+.app-tab-pill {
+  background-color: var(--app-tab-background);
+}
+
+.app-tab-pill[data-active-tab="false"]:hover {
+  background-color: var(--app-tab-hover-background, color-mix(in oklch, var(--foreground) 8%, transparent));
 }
 
 .dirty-tab-marker {

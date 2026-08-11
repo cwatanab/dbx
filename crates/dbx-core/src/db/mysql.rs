@@ -21,7 +21,8 @@ use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    ForeignKeyInfo, IndexInfo, ObjectInfo, ObjectStatistics, QueryResult, SpatialColumnBuilder, TableInfo, TriggerInfo,
+    ForeignKeyInfo, IndexInfo, ObjectInfo, ObjectStatistics, QueryMessage, QueryResult, SpatialColumnBuilder,
+    TableInfo, TriggerInfo,
 };
 
 use super::file_validator::validate_file_path;
@@ -99,6 +100,23 @@ where
     row.get_opt::<T, I>(index).and_then(|result| result.ok())
 }
 
+fn first_column_value<T>(row: &mysql_async::Row) -> Option<T>
+where
+    T: mysql_async::prelude::FromValue,
+{
+    row_get(row, 0)
+}
+
+async fn query_first_column<T>(conn: &mut mysql_async::Conn, sql: &str) -> Result<Option<T>, mysql_async::Error>
+where
+    T: mysql_async::prelude::FromValue,
+{
+    // Some MySQL-compatible servers return extra columns for scalar queries.
+    // Convert only column zero so mysql_async does not panic on the row width.
+    let row = conn.query_first::<mysql_async::Row, _>(sql).await?;
+    Ok(row.as_ref().and_then(first_column_value))
+}
+
 /// 字节转 String：合法 UTF-8（绝大多数场景）时直接复用入参缓冲零拷贝，
 /// 仅在非法序列时退化为 lossy 替换。from_utf8_lossy(&b).to_string() 即使
 /// 对合法输入也会多一次分配+拷贝。
@@ -147,9 +165,8 @@ fn nonblank(value: String) -> Option<String> {
 async fn query_first_nonblank_string(conn: &mut mysql_async::Conn, sql: &str) -> Option<String> {
     // MySQL reports nullable metadata such as TABLE_COLLATION as NULL for views.
     // Reading it as String makes mysql_async panic during row conversion.
-    match conn.query_first::<Option<String>, _>(sql).await {
-        Ok(Some(value)) => value.and_then(nonblank),
-        Ok(None) => None,
+    match query_first_column::<String>(conn, sql).await {
+        Ok(value) => value.and_then(nonblank),
         Err(error) => {
             log::debug!("Failed to read optional MySQL database information with `{sql}`: {error}");
             None
@@ -1285,7 +1302,7 @@ async fn enable_explicit_timestamp_defaults_for_query(conn: &mut mysql_async::Co
         return None;
     }
 
-    let previous = match conn.query_first::<u8, _>("SELECT @@SESSION.explicit_defaults_for_timestamp").await {
+    let previous = match query_first_column::<u8>(conn, "SELECT @@SESSION.explicit_defaults_for_timestamp").await {
         Ok(Some(value)) => value != 0,
         Ok(None) => {
             log::debug!("Skipping MySQL explicit timestamp defaults compatibility setting: variable was empty");
@@ -2942,6 +2959,8 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
         updated_at: get_opt_str(row, "updated_at"),
         parent_schema: get_opt_str(row, "parent_schema"),
         parent_name: get_opt_str(row, "parent_name"),
+        trigger: None,
+        xugu_type_members_expandable: None,
     }
 }
 
@@ -3212,6 +3231,8 @@ fn table_infos_to_objects(
                 updated_at: meta.and_then(|meta| meta.updated_at.clone()),
                 parent_schema: table.parent_schema,
                 parent_name: table.parent_name,
+                trigger: None,
+                xugu_type_members_expandable: None,
             }
         })
         .collect()
@@ -3772,6 +3793,80 @@ async fn ping_conn_with_timeout_and_cancel(
     }
 }
 
+/// Maps `SHOW WARNINGS` rows (`Level`, `Code`, `Message`) to query messages.
+fn mysql_warning_rows_to_messages(rows: Vec<(String, u16, String)>) -> Vec<QueryMessage> {
+    rows.into_iter()
+        .map(|(level, code, message)| QueryMessage {
+            severity: level,
+            code: Some(code.to_string()),
+            message,
+            detail: None,
+            hint: None,
+        })
+        .collect()
+}
+
+/// Maps a non-empty OK-packet info string (e.g. `Records: 3 Duplicates: 0
+/// Warnings: 1`) to an INFO query message.
+fn mysql_info_message(info: &str) -> Option<QueryMessage> {
+    let info = info.trim();
+    if info.is_empty() {
+        return None;
+    }
+    Some(QueryMessage { severity: "INFO".to_string(), code: None, message: info.to_string(), detail: None, hint: None })
+}
+
+fn mysql_warnings_fallback_message(warnings: u16) -> QueryMessage {
+    QueryMessage {
+        severity: "Warning".to_string(),
+        code: None,
+        message: format!("{warnings} warning(s)"),
+        detail: None,
+        hint: None,
+    }
+}
+
+/// Builds the message list from an OK-packet info string plus the outcome of a
+/// `SHOW WARNINGS` query: `None` when the query failed (MySQL-compatible
+/// proxies such as Doris/StarRocks may not support it), `Some(rows)` with its
+/// rows otherwise. An empty successful result still falls back to the
+/// count-only message so a nonzero warning count is never silently dropped.
+fn mysql_server_messages_from_warnings(
+    info: &str,
+    warnings: u16,
+    warning_rows: Option<Vec<(String, u16, String)>>,
+) -> Vec<QueryMessage> {
+    let mut messages: Vec<QueryMessage> = mysql_info_message(info).into_iter().collect();
+    if warnings == 0 {
+        return messages;
+    }
+    match warning_rows {
+        Some(rows) if !rows.is_empty() => messages.extend(mysql_warning_rows_to_messages(rows)),
+        _ => messages.push(mysql_warnings_fallback_message(warnings)),
+    }
+    messages
+}
+
+/// Best-effort collection of server messages for a finished statement: the
+/// OK-packet info string plus `SHOW WARNINGS` output when the server reported
+/// warnings. `SHOW WARNINGS` runs on the same connection; all errors are
+/// swallowed (MySQL-compatible proxies such as Doris/StarRocks may not support
+/// it) and fall back to a count-only message.
+async fn collect_mysql_server_messages(conn: &mut mysql_async::Conn, warnings: u16, info: &str) -> Vec<QueryMessage> {
+    let warning_rows = if warnings == 0 {
+        None
+    } else {
+        match conn.query_iter("SHOW WARNINGS").await {
+            Ok(result) => match result.try_collect_and_drop::<(String, u16, String)>().await {
+                Ok(rows) => rows.into_iter().collect::<Result<Vec<_>, _>>().ok(),
+                Err(_) => None,
+            },
+            Err(_) => None,
+        }
+    };
+    mysql_server_messages_from_warnings(info, warnings, warning_rows)
+}
+
 async fn execute_result_set_with_text_protocol_on_conn(
     conn: &mut mysql_async::Conn,
     sql: &str,
@@ -3781,6 +3876,11 @@ async fn execute_result_set_with_text_protocol_on_conn(
 ) -> Result<QueryResult, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     if !advance_to_result_set_with_columns(&mut result).await? {
+        let affected_rows = result.affected_rows();
+        let warnings = result.warnings();
+        let info = result.info().into_owned();
+        drop(result);
+        let messages = collect_mysql_server_messages(conn, warnings, &info).await;
         return Ok(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -3788,12 +3888,13 @@ async fn execute_result_set_with_text_protocol_on_conn(
             spatial_columns: vec![],
             spatial_values: vec![],
             rows: vec![],
-            affected_rows: result.affected_rows(),
+            affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
             truncated: false,
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages,
         });
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
@@ -3802,6 +3903,11 @@ async fn execute_result_set_with_text_protocol_on_conn(
 
     if should_collect_text_result_set(sql, row_limit, max_rows) {
         let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+        // collect_and_drop consumed the result; warnings/info now reflect the
+        // trailing EOF/OK packet of the finished result set.
+        let warnings = conn.get_warnings();
+        let info = conn.info().into_owned();
+        let messages = collect_mysql_server_messages(conn, warnings, &info).await;
         let truncated = rows.len() > row_limit;
         let mut spatial_values = Vec::new();
         let result_rows = rows
@@ -3827,6 +3933,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages,
         });
     }
 
@@ -3849,6 +3956,21 @@ async fn execute_result_set_with_text_protocol_on_conn(
         result_rows.push(values);
         spatial_values.push(srids);
     }
+    drop(stream);
+
+    // A truncated stream broke out of the row loop before this result set's
+    // terminator packet arrived, so `result.warnings()`/`result.info()` still
+    // hold the previous statement's values; skip capture instead of reporting
+    // stale messages.
+    let messages = if truncated {
+        drop(result);
+        Vec::new()
+    } else {
+        let warnings = result.warnings();
+        let info = result.info().into_owned();
+        drop(result);
+        collect_mysql_server_messages(conn, warnings, &info).await
+    };
 
     Ok(QueryResult {
         columns,
@@ -3863,6 +3985,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages,
     })
 }
 
@@ -3873,8 +3996,20 @@ async fn execute_result_sets_with_text_protocol_on_conn(
     max_rows: Option<usize>,
     start: Instant,
 ) -> Result<Vec<QueryResult>, String> {
+    // Per-set warnings/info read after each `collect()` are only accurate when
+    // the connection negotiated CLIENT_DEPRECATE_EOF: with legacy EOF packets
+    // the next result set's column-definition EOF clobbers the previous OK
+    // state, and a following column-less statement's OK packet would be
+    // misattributed to the wrong set. mysql_async does not expose the
+    // negotiated capability publicly, so gate on the client-side
+    // `deprecate_eof` option requested when the pool was built (DBX disables
+    // it automatically when a proxy only speaks legacy EOF). When disabled,
+    // per-set messages stay empty and only the final SHOW WARNINGS attachment
+    // on the last result set reports warnings.
+    let capture_per_set_messages = conn.opts().deprecate_eof();
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
-    let mut results = Vec::new();
+    let mut results: Vec<QueryResult> = Vec::new();
+    let mut result_set_warnings: Vec<u16> = Vec::new();
 
     while advance_to_result_set_with_columns(&mut result).await? {
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
@@ -3915,6 +4050,13 @@ async fn execute_result_sets_with_text_protocol_on_conn(
             rows
         };
 
+        let warnings = if capture_per_set_messages { result.warnings() } else { 0 };
+        let messages: Vec<QueryMessage> = if capture_per_set_messages {
+            mysql_info_message(&result.info()).into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        result_set_warnings.push(warnings);
         results.push(QueryResult {
             columns,
             column_types,
@@ -3928,10 +4070,16 @@ async fn execute_result_sets_with_text_protocol_on_conn(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages,
         });
     }
 
     if results.is_empty() {
+        let affected_rows = result.affected_rows();
+        let warnings = result.warnings();
+        let info = result.info().into_owned();
+        drop(result);
+        let messages = collect_mysql_server_messages(conn, warnings, &info).await;
         results.push(QueryResult {
             columns: vec![],
             column_types: Vec::new(),
@@ -3939,13 +4087,40 @@ async fn execute_result_sets_with_text_protocol_on_conn(
             spatial_columns: vec![],
             spatial_values: vec![],
             rows: vec![],
-            affected_rows: result.affected_rows(),
+            affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
             truncated: false,
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages,
         });
+        return Ok(results);
+    }
+    // Without per-set capture (no CLIENT_DEPRECATE_EOF) the per-iteration
+    // counts were skipped above; the connection state after the loop still
+    // reflects the last statement's terminator, so use its warnings count for
+    // the final SHOW WARNINGS attachment on the last result set.
+    if !capture_per_set_messages {
+        let last_index = result_set_warnings.len() - 1;
+        result_set_warnings[last_index] = result.warnings();
+    }
+    drop(result);
+
+    // SHOW WARNINGS only reports the last executed statement, so detailed
+    // warning rows can only be attached to the last result set; earlier sets
+    // with warnings get a count-only fallback message.
+    let last_index = results.len() - 1;
+    for (index, warnings) in result_set_warnings.iter().copied().enumerate() {
+        if warnings == 0 {
+            continue;
+        }
+        if index == last_index {
+            let mut messages = collect_mysql_server_messages(conn, warnings, "").await;
+            results[index].messages.append(&mut messages);
+        } else {
+            results[index].messages.push(mysql_warnings_fallback_message(warnings));
+        }
     }
 
     Ok(results)
@@ -3993,6 +4168,21 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
         result_rows.push(values);
         spatial_values.push(srids);
     }
+    drop(stream);
+
+    // A truncated stream broke out of the row loop before this result set's
+    // terminator packet arrived, so `result.warnings()`/`result.info()` still
+    // hold the previous statement's values; skip capture instead of reporting
+    // stale messages.
+    let messages = if truncated {
+        drop(result);
+        Vec::new()
+    } else {
+        let warnings = result.warnings();
+        let info = result.info().into_owned();
+        drop(result);
+        collect_mysql_server_messages(conn, warnings, &info).await
+    };
 
     Ok(QueryResult {
         columns,
@@ -4007,6 +4197,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages,
     })
 }
 
@@ -4016,7 +4207,7 @@ pub async fn execute_query(pool: &MySqlPool, sql: &str, bare: bool) -> Result<Qu
 
 pub async fn max_allowed_packet(pool: &MySqlPool) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    conn.query_first::<u64, _>("SELECT @@max_allowed_packet")
+    query_first_column::<u64>(&mut conn, "SELECT @@max_allowed_packet")
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "MySQL did not return @@max_allowed_packet".to_string())
@@ -4258,7 +4449,13 @@ pub async fn execute_query_on_conn_with_max_rows(
             }
         };
         let affected_rows = result.affected_rows();
+        let warnings = result.warnings();
+        let info = result.info().into_owned();
         let drop_result = result.drop_result().await;
+        // Collect server messages before restoring the timestamp defaults: the
+        // restore issues `SET SESSION explicit_defaults_for_timestamp`, which
+        // clears the diagnostics area and would leave SHOW WARNINGS empty.
+        let messages = collect_mysql_server_messages(conn, warnings, &info).await;
         restore_explicit_timestamp_defaults_for_query(conn, previous_explicit_timestamp_defaults).await;
         drop_result.map_err(|e| e.to_string())?;
 
@@ -4275,6 +4472,7 @@ pub async fn execute_query_on_conn_with_max_rows(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages,
         })
     }
 }
@@ -5002,6 +5200,13 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
             name: get_str_by_name(row, "TRIGGER_NAME"),
             event: get_str_by_name(row, "EVENT_MANIPULATION"),
             timing: get_str_by_name(row, "ACTION_TIMING"),
+            level: None,
+            condition: None,
+            language: None,
+            enabled: None,
+            valid: None,
+            comment: None,
+            created_at: None,
             statement: Some(get_str_by_name(row, "ACTION_STATEMENT")).filter(|value| !value.is_empty()),
         })
         .collect())
@@ -5010,6 +5215,125 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mysql_async::{consts::ColumnType, Column, Value};
+    use mysql_common::row::new_row;
+
+    fn mysql_test_row(values: Vec<Value>) -> mysql_async::Row {
+        let columns = values
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(format!("column_{index}").as_bytes())
+            })
+            .collect::<Vec<_>>()
+            .into();
+        new_row(values, columns)
+    }
+
+    #[test]
+    fn mysql_first_column_value_ignores_extra_result_columns() {
+        let row = mysql_async::from_row::<mysql_async::Row>(mysql_test_row(vec![
+            Value::Bytes(Vec::new()),
+            Value::Bytes(Vec::new()),
+        ]));
+
+        assert_eq!(first_column_value::<String>(&row), Some(String::new()));
+    }
+
+    #[test]
+    fn mysql_first_column_value_handles_null_and_conversion_failures() {
+        let null_row = mysql_test_row(vec![Value::NULL, Value::Bytes(b"ignored".to_vec())]);
+        let invalid_number_row = mysql_test_row(vec![Value::Bytes(b"not-a-number".to_vec())]);
+
+        assert_eq!(first_column_value::<String>(&null_row), None);
+        assert_eq!(first_column_value::<u64>(&invalid_number_row), None);
+    }
+
+    #[test]
+    fn mysql_first_column_value_reads_integer_metadata() {
+        let enabled_row = mysql_test_row(vec![Value::Int(1), Value::Bytes(b"ignored".to_vec())]);
+        let packet_row = mysql_test_row(vec![Value::UInt(67_108_864), Value::Bytes(b"ignored".to_vec())]);
+
+        assert_eq!(first_column_value::<u8>(&enabled_row), Some(1));
+        assert_eq!(first_column_value::<u64>(&packet_row), Some(67_108_864));
+    }
+
+    #[test]
+    fn mysql_info_message_maps_non_empty_info_strings() {
+        let message = mysql_info_message("Records: 3  Duplicates: 0  Warnings: 1").unwrap();
+        assert_eq!(message.severity, "INFO");
+        assert_eq!(message.message, "Records: 3  Duplicates: 0  Warnings: 1");
+        assert_eq!(message.code, None);
+        assert_eq!(message.detail, None);
+        assert_eq!(message.hint, None);
+
+        assert!(mysql_info_message("").is_none());
+        assert!(mysql_info_message("   ").is_none());
+    }
+
+    #[test]
+    fn mysql_warning_rows_to_messages_maps_levels_and_codes() {
+        let messages = mysql_warning_rows_to_messages(vec![
+            ("Warning".to_string(), 1265, "Data truncated for column 'a' at row 1".to_string()),
+            ("Note".to_string(), 1051, "Unknown table 't'".to_string()),
+        ]);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].severity, "Warning");
+        assert_eq!(messages[0].code.as_deref(), Some("1265"));
+        assert_eq!(messages[0].message, "Data truncated for column 'a' at row 1");
+        assert_eq!(messages[0].detail, None);
+        assert_eq!(messages[0].hint, None);
+        assert_eq!(messages[1].severity, "Note");
+        assert_eq!(messages[1].code.as_deref(), Some("1051"));
+
+        assert!(mysql_warning_rows_to_messages(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn mysql_warnings_fallback_message_reports_count() {
+        let message = mysql_warnings_fallback_message(3);
+        assert_eq!(message.severity, "Warning");
+        assert_eq!(message.message, "3 warning(s)");
+        assert_eq!(message.code, None);
+    }
+
+    #[test]
+    fn mysql_server_messages_from_warnings_maps_info_and_warning_rows() {
+        let rows = vec![("Warning".to_string(), 1265, "Data truncated for column 'a' at row 1".to_string())];
+        let messages = mysql_server_messages_from_warnings("Records: 1  Duplicates: 0  Warnings: 1", 1, Some(rows));
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].severity, "INFO");
+        assert_eq!(messages[1].severity, "Warning");
+        assert_eq!(messages[1].code.as_deref(), Some("1265"));
+    }
+
+    #[test]
+    fn mysql_server_messages_from_warnings_falls_back_when_show_warnings_returns_no_rows() {
+        let messages = mysql_server_messages_from_warnings("", 2, Some(Vec::new()));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].severity, "Warning");
+        assert_eq!(messages[0].message, "2 warning(s)");
+    }
+
+    #[test]
+    fn mysql_server_messages_from_warnings_falls_back_when_show_warnings_fails() {
+        let messages = mysql_server_messages_from_warnings("", 2, None);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message, "2 warning(s)");
+    }
+
+    #[test]
+    fn mysql_server_messages_from_warnings_skips_warnings_when_count_is_zero() {
+        let messages = mysql_server_messages_from_warnings("Query OK", 0, None);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].severity, "INFO");
+        assert_eq!(messages[0].message, "Query OK");
+    }
 
     #[test]
     fn mysql_sql_statement_limit_reserves_packet_headroom() {
@@ -5062,6 +5386,8 @@ mod tests {
             updated_at: None,
             parent_schema: None,
             parent_name: None,
+            trigger: None,
+            xugu_type_members_expandable: None,
         }
     }
 

@@ -12,7 +12,7 @@ import { matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
-import { copyNameForTreeNode, objectSourceKindForTreeNode } from "@/lib/sidebar/treeNodeClick";
+import { copyNameForTreeNode, objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { connectionPasteTargetGroupId, copySelectedConnectionsToClipboards, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebar/sidebarTypeSearch";
@@ -29,6 +29,7 @@ import TreeItem from "./TreeItem.vue";
 import SidebarTreeRuntimeHost from "./SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "./SidebarTreeItemDialogs.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
+import ExtensionDetailsDialog from "@/components/objects/ExtensionDetailsDialog.vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -44,7 +45,7 @@ import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActio
 import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import type { SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState } from "./sidebarTreeDialogState";
-import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
+import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
@@ -79,6 +80,8 @@ const sidebarDangerDialogConfirming = ref(false);
 const sidebarTreeItemDialogController = ref<Record<string, any> | null>(null);
 const sidebarInstallExtensionTarget = ref<TreeNode | null>(null);
 const sidebarInstallExtensionDialogRef = ref<InstanceType<typeof InstallExtensionDialog> | null>(null);
+const sidebarExtensionDetailsTarget = ref<TreeNode | null>(null);
+const sidebarExtensionDetailsDialogRef = ref<InstanceType<typeof ExtensionDetailsDialog> | null>(null);
 const sidebarTreeRuntimeHostRef = ref<SidebarTreeRuntimeHostInstance | null>(null);
 const sidebarTreeRuntime = createSidebarTreeRuntime();
 const sidebarTreeRuntimeInitialNode: TreeNode = { id: "__sidebar-runtime__", label: "", type: "connection-group" };
@@ -92,6 +95,8 @@ const sidebarVisibleDatabasesTarget = ref<TreeNode | null>(null);
 const sidebarVisibleDatabasesOpen = ref(false);
 const sidebarVisibleSchemasTarget = ref<TreeNode | null>(null);
 const sidebarVisibleSchemasOpen = ref(false);
+const sidebarVisibleNacosNamespacesTarget = ref<TreeNode | null>(null);
+const sidebarVisibleNacosNamespacesOpen = ref(false);
 const sidebarTableNameFilterTarget = ref<TreeNode | null>(null);
 const sidebarTableNameFilterOpen = ref(false);
 const tableNameFilterIncludeDraft = ref("");
@@ -101,7 +106,8 @@ const sidebarDdlDatabaseType = computed(() => {
   const connectionId = sidebarDdlTarget.value?.connectionId;
   return connectionId ? effectiveDatabaseTypeForConnection(store.getConfig(connectionId)) : undefined;
 });
-const sidebarObjectSourceType = computed(() => (sidebarObjectSourceTarget.value ? objectSourceKindForTreeNode(sidebarObjectSourceTarget.value.node.type) : null));
+const sidebarObjectSourceResolvedTarget = computed(() => (sidebarObjectSourceTarget.value ? objectSourceTargetForTreeNode(sidebarObjectSourceTarget.value.node) : null));
+const sidebarObjectSourceType = computed(() => sidebarObjectSourceResolvedTarget.value?.objectType ?? null);
 const sidebarObjectSourceDatabaseType = computed(() => {
   const connectionId = sidebarObjectSourceTarget.value?.node.connectionId;
   return connectionId ? effectiveDatabaseTypeForConnection(store.getConfig(connectionId)) : undefined;
@@ -247,7 +253,7 @@ const isRootListPartial = computed(() => sidebarFilterGuards.value.isRootListPar
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
-  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "mongo-db"],
+  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "consul-root", "mongo-db"],
   schema: ["schema"],
   table: ["table", "mongo-collection", "mongo-bucket", "vector-collection", "elasticsearch-index"],
   view: ["view"],
@@ -428,15 +434,14 @@ function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
     if (!query || !children) return children === node.children ? node : { ...node, children };
 
     const indexed = localTableSearchResults.value[node.id];
+    // matchSidebarLabel compares case-insensitively internally and needs the
+    // ORIGINAL label (and entry name) so camelCase boundaries stay detectable.
     const matchingChildren =
       indexed === null
-        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()))
+        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query))
         : indexed
-          ? reuseLiveSidebarTreeNodes(
-              buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name.toLowerCase(), query.toLowerCase())) }),
-              children,
-            )
-          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label.toLowerCase(), query.toLowerCase()));
+          ? reuseLiveSidebarTreeNodes(buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name, query)) }), children)
+          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query));
     return { ...node, children: matchingChildren };
   });
 }
@@ -1090,7 +1095,7 @@ function resolveLoadedLocateTarget(target: ActiveTabSidebarTarget, candidate: Qu
 }
 
 async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: { force?: boolean }) {
-  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "etcd-access-control" || target.type === "zookeeper-root") return;
+  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "etcd-access-control" || target.type === "zookeeper-root" || target.type === "consul-root") return;
   const connId = target.connectionId;
   if (!connId) return;
 
@@ -1128,7 +1133,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
     }
   }
 
-  if (config.db_type === "mq" || config.db_type === "nacos") return;
+  if (config.db_type === "mq" || config.db_type === "nacos" || config.db_type === "consul") return;
   if (!("database" in target) || !target.database) return;
 
   // Find the database node
@@ -1285,6 +1290,12 @@ async function openSidebarInstallExtension(node: TreeNode) {
   sidebarInstallExtensionDialogRef.value?.show();
 }
 
+async function openSidebarExtensionDetails(node: TreeNode) {
+  sidebarExtensionDetailsTarget.value = createSidebarActionTarget(node);
+  await nextTick();
+  sidebarExtensionDetailsDialogRef.value?.show();
+}
+
 function beginSidebarAction(): number {
   sidebarActionGeneration += 1;
   sidebarDdlOpen.value = false;
@@ -1292,12 +1303,14 @@ function beginSidebarAction(): number {
   sidebarProcedureOpen.value = false;
   sidebarVisibleDatabasesOpen.value = false;
   sidebarVisibleSchemasOpen.value = false;
+  sidebarVisibleNacosNamespacesOpen.value = false;
   sidebarTableNameFilterOpen.value = false;
   sidebarDdlTarget.value = null;
   sidebarObjectSourceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
+  sidebarVisibleNacosNamespacesTarget.value = null;
   sidebarTableNameFilterTarget.value = null;
   return sidebarActionGeneration;
 }
@@ -1324,7 +1337,7 @@ function openSidebarDdlForSelection(): boolean {
 }
 
 function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
-  if (!node.connectionId || !node.database || !objectSourceKindForTreeNode(node.type)) return;
+  if (!node.connectionId || !node.database || !objectSourceTargetForTreeNode(node)) return;
   const target = createSidebarActionTarget(node);
   const requestGeneration = beginSidebarAction();
   void store
@@ -1381,6 +1394,13 @@ function openSidebarVisibleSchemas(node: TreeNode) {
   beginSidebarAction();
   sidebarVisibleSchemasTarget.value = createSidebarActionTarget({ ...node, database });
   sidebarVisibleSchemasOpen.value = true;
+}
+
+function openSidebarVisibleNacosNamespaces(node: TreeNode) {
+  if (node.type !== "connection" || !node.connectionId || store.getConfig(node.connectionId)?.db_type !== "nacos") return;
+  beginSidebarAction();
+  sidebarVisibleNacosNamespacesTarget.value = createSidebarActionTarget(node);
+  sidebarVisibleNacosNamespacesOpen.value = true;
 }
 
 function tableNameFilterScopeForNode(node: TreeNode): string | null {
@@ -1483,6 +1503,10 @@ watch(sidebarVisibleDatabasesOpen, (open) => {
 
 watch(sidebarVisibleSchemasOpen, (open) => {
   if (!open) sidebarVisibleSchemasTarget.value = null;
+});
+
+watch(sidebarVisibleNacosNamespacesOpen, (open) => {
+  if (!open) sidebarVisibleNacosNamespacesTarget.value = null;
 });
 
 watch(sidebarTableNameFilterOpen, (open) => {
@@ -1708,6 +1732,7 @@ onUnmounted(() => {
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
   sidebarVisibleSchemasTarget.value = null;
+  sidebarVisibleNacosNamespacesTarget.value = null;
   sidebarTreeItemDialogController.value = null;
   sidebarDangerDialogRequest.value = null;
   resetSidebarTreeDialogState();
@@ -1747,11 +1772,13 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       @open-data="openSidebarData"
       @open-visible-databases="openSidebarVisibleDatabases"
       @open-visible-schemas="openSidebarVisibleSchemas"
+      @open-visible-nacos-namespaces="openSidebarVisibleNacosNamespaces"
       @open-table-name-filters="openSidebarTableNameFilters"
       @request-group-rename="startRenamingCreatedGroup"
       @open-danger-dialog="openSidebarDangerDialog"
       @open-dialog-controller="updateSidebarTreeItemDialogController"
       @open-install-extension="openSidebarInstallExtension"
+      @open-extension-details="openSidebarExtensionDetails"
     />
     <div class="connection-tree-search sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
@@ -1954,10 +1981,10 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       v-model:open="sidebarObjectSourceOpen"
       :connection-id="sidebarObjectSourceTarget.node.connectionId!"
       :database="sidebarObjectSourceTarget.node.database!"
-      :schema="sidebarObjectSourceTarget.node.schema"
-      :name="sidebarObjectSourceTarget.node.objectName || sidebarObjectSourceTarget.node.label"
+      :schema="sidebarObjectSourceResolvedTarget?.schema"
+      :name="sidebarObjectSourceResolvedTarget!.name"
       :relation-name="sidebarObjectSourceTarget.node.tableName"
-      :signature="sidebarObjectSourceTarget.node.signature"
+      :signature="sidebarObjectSourceResolvedTarget?.signature"
       :object-type="sidebarObjectSourceType"
       :database-type="sidebarObjectSourceDatabaseType"
       :dialect="sidebarObjectSourceDialect"
@@ -1987,6 +2014,8 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
       :connection-name="sidebarVisibleSchemasTarget.label"
       :database="sidebarVisibleSchemasTarget.database"
     />
+
+    <SidebarVisibleNacosNamespacesDialog v-if="sidebarVisibleNacosNamespacesTarget?.connectionId" v-model:open="sidebarVisibleNacosNamespacesOpen" :connection-id="sidebarVisibleNacosNamespacesTarget.connectionId" :connection-name="sidebarVisibleNacosNamespacesTarget.label" />
     <Dialog v-model:open="sidebarTableNameFilterOpen">
       <DialogContent class="max-w-xl">
         <DialogHeader class="space-y-2">
@@ -2057,6 +2086,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes });
     </SidebarDangerConfirmDialog>
     <SidebarTreeItemDialogs v-if="sidebarTreeItemDialogController" :key="sidebarTreeItemDialogController.node?.id" :controller="sidebarTreeItemDialogController" @closed="sidebarTreeItemDialogController = null" />
     <InstallExtensionDialog v-if="sidebarInstallExtensionTarget" ref="sidebarInstallExtensionDialogRef" :node="sidebarInstallExtensionTarget" @close="refreshSidebarActionTarget" @changed="refreshSidebarActionTarget" />
+    <ExtensionDetailsDialog v-if="sidebarExtensionDetailsTarget" ref="sidebarExtensionDetailsDialogRef" :node="sidebarExtensionDetailsTarget" />
     <div v-if="store.treeNodes.length === 0" class="px-3 py-8 text-center text-muted-foreground text-xs">
       {{ t("sidebar.noConnections") }}
     </div>
