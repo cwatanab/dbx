@@ -742,8 +742,7 @@ function editorIndentUnit(): string {
 }
 
 function handleTab(view: EditorViewType): boolean {
-  if (codeMirrorCompletionStatus?.(view.state)) return false;
-  return performNormalTab(view);
+  return acceptCompletionOrNextSnippetField(view) || performNormalTab(view);
 }
 
 function performNormalTab(view: EditorViewType): boolean {
@@ -1853,11 +1852,8 @@ function extendQueryEditorSelectionForView(currentView: EditorViewType): boolean
 function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
   const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
   if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return true;
-  // Snippet fields keep their normal immediate Tab priority when completion
-  // is pending or still inside CodeMirror's interaction delay.
-  if (codeMirrorNextSnippetField?.(view)) return true;
   if (completionStatus) return waitForCompletionTab(view);
-  return false;
+  return codeMirrorNextSnippetField?.(view) ?? false;
 }
 
 function clearPendingCompletionTab() {
@@ -1879,7 +1875,6 @@ function waitForCompletionTab(view: EditorViewType): boolean {
 
     const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
     if (completionStatus === "active" && (codeMirrorAcceptCompletion?.(view) ?? false)) return;
-    if (codeMirrorNextSnippetField?.(view)) return;
     if (completionStatus && Date.now() - startedAt < COMPLETION_TAB_MAX_WAIT_MS) {
       pendingCompletionTabTimer = setTimeout(retry, COMPLETION_TAB_RETRY_DELAY_MS);
       return;
@@ -3119,7 +3114,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
       markCompletionAccepted(item);
       const replaceTo = "replaceClosingQuote" in item && item.replaceClosingQuote === view.state.sliceDoc(to, to + 1) ? to + 1 : to;
       const insert = appendSqlCompletionSpace(item.apply ?? item.label, {
-        enabled: shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion,
+        enabled: ("appendSpace" in item && item.appendSpace === true) || (shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion),
         itemType: item.type,
         nextCharacter: view.state.sliceDoc(replaceTo, replaceTo + 1),
       });
@@ -3162,11 +3157,22 @@ async function provideRedisCompletions(currentState: import("@codemirror/state")
   const fullDoc = currentState.doc.toString();
   if (!explicit && !shouldAutoOpenRedisCompletion(fullDoc, position)) return null;
 
-  const completionContext = getRedisCompletionContext(fullDoc, position);
+  let commands;
+  try {
+    commands = await connectionStore.listRedisCompletionCommandDocs(props.connectionId, props.database ?? "0");
+  } catch {
+    // Completion is deliberately instance-driven: do not substitute a bundled
+    // command list when the server does not expose command metadata.
+    return null;
+  }
+  if (epoch !== completionEpoch) return null;
+
+  const completionInput = { commands };
+  const completionContext = getRedisCompletionContext(fullDoc, position, completionInput);
   // Key-name completion needs a reliable db index; props.database may briefly be "" on
   // the New Query path before the active db resolves, and only key-argument commands warrant it.
   let keys: string[] = [];
-  if (completionContext.mode === "argument" && props.database && takesKeyArgument(completionContext.mainCommand)) {
+  if (completionContext.mode === "argument" && props.database && takesKeyArgument(completionContext.commandName, completionInput, completionContext.argumentIndex, completionContext.argumentValues)) {
     try {
       keys = await connectionStore.listRedisCompletionKeys(props.connectionId, props.database);
     } catch {
@@ -3177,6 +3183,7 @@ async function provideRedisCompletions(currentState: import("@codemirror/state")
 
   const items = buildRedisCompletionItemsFromContext(completionContext, {
     keys,
+    commands,
   });
   if (items.length === 0) return null;
   // Use the built-in filter (the default) so typing narrows the list and moves
