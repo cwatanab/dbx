@@ -17,7 +17,7 @@ name = "dbx"
 path = "src/main.rs"
 
 [features]
-default = ["duckdb-sidecar", "mq-admin", "sqlite-sqlcipher", "system-fonts"]
+default = ["duckdb-sidecar", "mq-admin", "system-fonts"]
 custom-protocol = ["tauri/custom-protocol"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 mq-admin = ["dbx-core/mq-admin"]
