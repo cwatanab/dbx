@@ -7,7 +7,36 @@ import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, CheckSquare2, Columns3Cog, Copy, EyeOff, Loader2, Search, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, Database, Download, Upload, X, Pin, Rows3, SquareDashed, Minus, Plus, ShieldAlert, AlignLeft, AlignRight, PanelsTopLeft } from "@lucide/vue";
+import {
+  Check,
+  CheckSquare2,
+  Columns3Cog,
+  Copy,
+  EyeOff,
+  Loader2,
+  Search,
+  TableProperties,
+  ChevronDown,
+  ChevronUp,
+  Inbox,
+  RefreshCcw,
+  Wrench,
+  Toolbox,
+  Database,
+  Download,
+  Upload,
+  X,
+  Pin,
+  Rows3,
+  SquareDashed,
+  Minus,
+  Plus,
+  ShieldAlert,
+  AlignLeft,
+  AlignRight,
+  PanelsTopLeft,
+  Palette,
+} from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 import "splitpanes/dist/splitpanes.css";
@@ -71,9 +100,12 @@ const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/Ob
 const TableStructureEditor = defineAsyncComponent(() => import("@/components/structure/TableStructureEditor.vue"));
 const DatabaseUserAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseUserAdmin.vue"));
 const ProcessListPanel = defineAsyncComponent(() => import("@/components/admin/ProcessListPanel.vue"));
+const SqlServerActivityTracePanel = defineAsyncComponent(() => import("@/components/admin/SqlServerActivityTracePanel.vue"));
 const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MySqlDashboard.vue"));
 const PostgresDashboard = defineAsyncComponent(() => import("@/components/admin/PostgresDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
+const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
+const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
@@ -82,7 +114,7 @@ import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGr
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
-import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems, type ExecutionSummaryItem } from "@/lib/tabs/tabPresentation";
+import { databaseDisplayNameForTab, executionSummaryItems, queryResultExecutionSql, resultGridCacheKey, resultGridInstanceKey, resultRunItems, resultSourceRange, resultSqlForGrid, statementExecutionMarkers, tabularResultItems, type ExecutionSummaryItem } from "@/lib/tabs/tabPresentation";
 import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/table/tableEditing";
@@ -192,6 +224,8 @@ const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
 const setBooleanDisplayMode = (mode: "checkbox" | "dropdown") => settingsStore.updateEditorSettings({ dataGridBooleanDisplayMode: mode });
+const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.colorizeDataGridCellTypes);
+const setColorizeDataGridCellTypes = (value: boolean) => settingsStore.updateEditorSettings({ colorizeDataGridCellTypes: value });
 const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
 
@@ -390,6 +424,7 @@ const allResultExportSheets = computed(() =>
 );
 const resultRuns = computed(() => resultRunItems(props.activeTab));
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
+const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
 const activeResultSql = computed(() => resultSqlForGrid(props.activeTab));
 const activeResultExportSql = computed(() => queryResultExecutionSql(props.activeTab));
 const activeStatementExecutionMarkers = computed(() =>
@@ -1362,6 +1397,13 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                         </button>
                       </div>
                     </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.colorizeDataTypes") }}</span>
+                      </div>
+                      <Switch size="sm" :model-value="colorizeDataGridCellTypes" :aria-label="t('grid.colorizeDataTypes')" @update:model-value="setColorizeDataGridCellTypes" />
+                    </div>
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
                       <span class="min-w-0 flex items-center gap-2 font-medium">
                         <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -1508,8 +1550,9 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               <DataGrid
                 v-else-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
-                :key="activeResultGridCacheKey"
+                :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
+                :pending-state-key="activeResultGridInstanceKey"
                 class="flex-1 min-h-0"
                 :result="activeTab.result"
                 :sort-column="activeTab.resultSortColumn"
@@ -1854,6 +1897,13 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
                   </button>
                 </div>
               </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.colorizeDataTypes") }}</span>
+                </div>
+                <Switch size="sm" :model-value="colorizeDataGridCellTypes" :aria-label="t('grid.colorizeDataTypes')" @update:model-value="setColorizeDataGridCellTypes" />
+              </div>
               <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs" :class="{ 'opacity-60': !dataGridRef?.canToggleAllNullColumns }">
                 <span class="min-w-0 flex items-center gap-2 font-medium">
                   <EyeOff class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -2098,9 +2148,13 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
       <ProcessListPanel :key="activeTab.id" :connection="activeConnection" />
     </template>
 
+    <template v-else-if="activeTab.mode === 'sqlserver-trace' && activeConnection">
+      <SqlServerActivityTracePanel :key="activeTab.id" :connection="activeConnection" :tab-id="activeTab.id" />
+    </template>
+
     <template v-else-if="activeTab.mode === 'mysql-dashboard'">
       <div class="min-h-0 flex-1">
-        <MySqlDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
+        <MySqlDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" :client-session-id="activeTab.id" />
       </div>
     </template>
 
@@ -2118,6 +2172,14 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
 
     <template v-else-if="activeTab.mode === 'dameng-jobs' && activeConnection">
       <DamengJobAdmin :key="activeTab.id" :connection="activeConnection" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'dameng-users' && activeConnection">
+      <DamengUserAdmin :key="activeTab.id" :connection="activeConnection" />
+    </template>
+
+    <template v-else-if="activeTab.mode === 'dameng-roles' && activeConnection">
+      <DamengRoleAdmin :key="activeTab.id" :connection="activeConnection" />
     </template>
   </div>
 </template>

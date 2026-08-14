@@ -927,6 +927,8 @@ export async function executeMulti(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -967,6 +969,8 @@ export async function executeMultiWithProgress(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -3579,6 +3583,15 @@ export async function mongoCreateUser(connectionId: string, database: string, us
   });
 }
 
+export async function mongoRunCommand(connectionId: string, database: string, commandJson: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/run-command", {
+    connectionId,
+    database,
+    commandJson,
+    executionId,
+  });
+}
+
 export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return post("/api/mongo/drop-indexes", {
     connectionId,
@@ -3652,6 +3665,16 @@ export async function documentDeleteDocument(connectionId: string, database: str
     id,
     routing,
     documentType,
+  });
+}
+
+export async function documentSaveMeilisearchBatch(connectionId: string, collection: string, updates: Array<{ id: string; docJson: string }>, deleteIds: string[], inserts: string[]): Promise<number> {
+  return post("/api/document-store/save-meilisearch-batch", {
+    connectionId,
+    collection,
+    updates,
+    deleteIds,
+    inserts,
   });
 }
 
