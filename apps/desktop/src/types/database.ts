@@ -968,6 +968,8 @@ export interface TreeNode {
   id: string;
   label: string;
   type: TreeNodeType;
+  /** Additional values matched by sidebar search without rendering them. */
+  searchAliases?: string[];
   children?: TreeNode[];
   isLoading?: boolean;
   isExpanded?: boolean;
@@ -1076,6 +1078,8 @@ export interface QueryTab {
   id: string;
   title: string;
   customTitle?: boolean;
+  /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
+  forceWordWrap?: boolean;
   connectionId: string;
   database: string;
   schema?: string;
@@ -1243,6 +1247,7 @@ export interface QueryTab {
     multiSource?: boolean;
     allowInsert?: boolean;
     allowInsertDelete?: boolean;
+    distinct?: boolean;
     sources?: {
       key: string;
       catalog?: string;
@@ -1300,6 +1305,7 @@ export interface SavedSqlFile {
   folderId?: string;
   name: string;
   database: string;
+  /** Undefined means the connection's built-in/default catalog. */
   catalog?: string;
   schema?: string;
   sql: string;
