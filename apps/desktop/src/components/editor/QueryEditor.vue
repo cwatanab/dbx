@@ -22,11 +22,13 @@ import { canFormatSqlForDatabaseType, formatSqlForEditing, compressSqlText, type
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
+import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
 import { convertSqlSelectionCase, type SqlSelectionCaseMode } from "@/lib/sql/sqlSelectionCase";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
+import { detectAndFormatElasticsearchRequests } from "@/lib/elasticsearch/elasticsearchFormatter";
 import { useConnectionStore, COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
@@ -48,6 +50,7 @@ import {
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts, type SqlCompletionTriggerOrigin } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
@@ -217,7 +220,7 @@ const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 
 function sqlStatementParameterOptions() {
-  const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, props.databaseType);
+  const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, props.databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
   return { databaseType: props.databaseType, enabledSyntaxes: enabledSqlParameterSyntaxes(toggles) };
 }
 const { isDark, themePalette } = useTheme();
@@ -745,7 +748,25 @@ function editorIndentUnit(): string {
 }
 
 function handleTab(view: EditorViewType): boolean {
-  return acceptCompletionOrNextSnippetField(view) || performNormalTab(view);
+  if (tabKeyAcceptsCompletion()) {
+    return acceptCompletionOrNextSnippetField(view) || performNormalTab(view);
+  }
+  return handleTabWithoutAcceptingCompletion(view) || performNormalTab(view);
+}
+
+// The Tab key is always wired up for indentation and snippet-field navigation,
+// but it must only accept an open completion popup when the user's configured
+// "accept completion" shortcut is actually Tab — otherwise a user who remapped
+// that shortcut (e.g. to Enter) would find Tab silently accepting completions
+// anyway, ignoring their setting (dbx#6236).
+function tabKeyAcceptsCompletion(): boolean {
+  const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
+  return shortcutToCodeMirrorKey(shortcuts.acceptCompletion) === "Tab";
+}
+
+function handleTabWithoutAcceptingCompletion(view: EditorViewType): boolean {
+  if (codeMirrorCompletionStatus?.(view.state)) return false;
+  return codeMirrorNextSnippetField?.(view) ?? false;
 }
 
 function performNormalTab(view: EditorViewType): boolean {
@@ -1828,6 +1849,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.indentMore, (view) => codeMirrorIndentMore?.(view) ?? false),
         ...binding(shortcuts.indentLess, (view) => codeMirrorIndentLess?.(view) ?? false),
         ...binding(shortcuts.insertLineBelow, insertLineBelow),
+        ...binding(shortcuts.joinLines, joinQueryEditorLines),
         ...binding(shortcuts.duplicateLine, (view) => codeMirrorCopyLineDown?.(view) ?? false),
         ...binding(shortcuts.deleteLine, (view) => codeMirrorDeleteLine?.(view) ?? false),
         ...binding(shortcuts.moveLineUp, (view) => codeMirrorMoveLineUp?.(view) ?? false),
@@ -2932,19 +2954,27 @@ async function formatCurrentSql() {
     if (props.databaseType === "mongodb") {
       formatted = formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter);
     } else {
-      const structured = detectAndFormatStructured(source, {
-        indentSize: settingsStore.editorSettings.sqlFormatter.tabWidth,
-        useTabs: settingsStore.editorSettings.sqlFormatter.useTabs,
-      });
-      if (structured.kind === "json" || structured.kind === "xml") {
-        formatted = structured.formatted;
-      } else if (structured.kind === "unsupported") {
-        // Keep invalid structured text untouched — the SQL formatter would
-        // silently corrupt XML-looking content.
+      const esRequest = detectAndFormatElasticsearchRequests(source, props.databaseType, settingsStore.editorSettings.sqlFormatter.tabWidth);
+      if (esRequest.kind === "elasticsearch") {
+        formatted = esRequest.formatted;
+      } else if (esRequest.kind === "unsupported") {
         toast(t("toolbar.formatAutoDetectFailed"), 3000);
         return;
       } else {
-        formatted = await formatSqlForEditing(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+        const structured = detectAndFormatStructured(source, {
+          indentSize: settingsStore.editorSettings.sqlFormatter.tabWidth,
+          useTabs: settingsStore.editorSettings.sqlFormatter.useTabs,
+        });
+        if (structured.kind === "json" || structured.kind === "xml") {
+          formatted = structured.formatted;
+        } else if (structured.kind === "unsupported") {
+          // Keep invalid structured text untouched — the SQL formatter would
+          // silently corrupt XML-looking content.
+          toast(t("toolbar.formatAutoDetectFailed"), 3000);
+          return;
+        } else {
+          formatted = await formatSqlForEditing(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+        }
       }
     }
     if (view.value !== currentView || currentView.state !== originalState || currentView.state.sliceDoc(from, to) !== source) {
@@ -3754,7 +3784,14 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     }
   }
 
-  if (tables.length === 0 && completionObjects.length === 0 && schemaNames.length === 0 && columnsByTable.size === 0 && (completionContext.exclusiveTableSuggestions || completionContext.exclusiveColumnSuggestions || completionContext.exclusiveRoutineSuggestions)) {
+  if (
+    tables.length === 0 &&
+    completionObjects.length === 0 &&
+    schemaNames.length === 0 &&
+    columnsByTable.size === 0 &&
+    !driverProfileHasCompletionCandidates(sqlDriverProfile.value, completionContext) &&
+    (completionContext.exclusiveTableSuggestions || completionContext.exclusiveColumnSuggestions || completionContext.exclusiveRoutineSuggestions)
+  ) {
     return null;
   }
 

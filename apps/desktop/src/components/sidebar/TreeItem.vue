@@ -326,6 +326,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Columns3, colorClass: "text-muted-foreground" };
     case "group-tables":
       return { icon: Table, colorClass: "text-green-500" };
+    case "group-dolt-system-tables":
+      return { icon: Table, colorClass: "text-slate-500" };
     case "group-views":
       return { icon: Eye, colorClass: "text-purple-500" };
     case "group-materialized-views":
@@ -740,7 +742,7 @@ const labelWidthClass = computed(() => {
 
 watch(() => [isRightAlignedComment(), visibleLabel(activeNode.value), trailingComment.value, trailingCommentLayoutRef.value, trailingCommentLeadingRef.value], refreshTrailingCommentMeasurement, { flush: "post", immediate: true });
 
-const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
+const paddingLeft = computed(() => treeItemPaddingLeft(props.depth, settingsStore.editorSettings.sidebarIndent));
 
 const tableSearchParentId = computed(() => activeNode.value.tableSearchParentId || "");
 
@@ -1323,6 +1325,7 @@ function onKeydown(event: KeyboardEvent) {
             <span
               v-if="
                 (node.type === 'group-tables' ||
+                  node.type === 'group-dolt-system-tables' ||
                   node.type === 'group-views' ||
                   node.type === 'group-materialized-views' ||
                   node.type === 'group-procedures' ||
@@ -1421,8 +1424,9 @@ function onKeydown(event: KeyboardEvent) {
 <style>
 .sidebar-object-comment {
   color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 1rem;
+  /* Relative to the sidebar tree root font size so comments follow the sidebarFontSize setting. */
+  font-size: 0.85em;
+  line-height: 1.25;
   opacity: 0.6;
   /* Sidebar rows repaint on hover; avoid heavier font shaping and fallback here. */
   text-rendering: auto;
@@ -1436,7 +1440,7 @@ function onKeydown(event: KeyboardEvent) {
 
 .sidebar-object-comment--windows {
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
-  font-size: 14px;
+  font-size: 1em;
   font-weight: 500;
   opacity: 1;
 }

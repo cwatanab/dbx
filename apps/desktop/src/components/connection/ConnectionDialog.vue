@@ -48,6 +48,7 @@ import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMo
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
 import { DamengJvmSystemPropertyError, damengJvmSystemPropertiesText, parseDamengJvmSystemProperties } from "@/lib/database/damengJvmOptions";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInfoCopyText, databaseInfoRows, normalizeDatabaseConnectionInfo, type DatabaseInfoField } from "@/lib/connection/connectionDatabaseInfo";
@@ -117,7 +118,19 @@ import {
   elasticsearchKibanaBasePathFromConfig,
   type ElasticsearchConnectionMode,
 } from "@/lib/connection/elasticsearchKibanaProxy";
-import { GAUSSDB_M_JDBC_DRIVER_CLASS, gaussdbConnectionMode, gaussdbIdentifierQuoteStyle, setGaussdbConnectionMode, setGaussdbIdentifierQuoteStyle, supportsGaussdbIdentifierQuoteStyle, type GaussdbConnectionMode, type GaussdbIdentifierQuoteStyle } from "@/lib/database/jdbcDialect";
+import {
+  GAUSSDB_M_JDBC_DRIVER_CLASS,
+  gaussdbConnectionMode,
+  gaussdbIdentifierQuoteStyle,
+  gaussdbTargetServerType,
+  setGaussdbConnectionMode,
+  setGaussdbIdentifierQuoteStyle,
+  setGaussdbTargetServerType,
+  supportsGaussdbIdentifierQuoteStyle,
+  type GaussdbConnectionMode,
+  type GaussdbIdentifierQuoteStyle,
+  type GaussdbTargetServerType,
+} from "@/lib/database/jdbcDialect";
 import { normalizeStoredConnectionDatabase } from "@/lib/database/sqliteNamespace";
 import {
   createJdbcProductConnectionFieldsByMode,
@@ -527,6 +540,14 @@ const gaussdbQuoteStyle = computed<GaussdbIdentifierQuoteStyle>({
   get: () => gaussdbIdentifierQuoteStyle(form.value),
   set: (style) => {
     setGaussdbIdentifierQuoteStyle(form.value, style);
+    resetTestState();
+  },
+});
+
+const gaussdbTargetServerTypeComputed = computed<GaussdbTargetServerType>({
+  get: () => gaussdbTargetServerType(form.value),
+  set: (value) => {
+    setGaussdbTargetServerType(form.value, value);
     resetTestState();
   },
 });
@@ -1010,6 +1031,14 @@ const driverProfiles: Record<
     icon: "cloudberry",
     urlParams: "",
   },
+  opentenbase: {
+    type: "postgres",
+    port: 11000,
+    user: "opentenbase",
+    label: "OpenTenBase",
+    icon: "opentenbase",
+    urlParams: "",
+  },
   redis: { type: "redis", port: 6379, user: "", label: "Redis", icon: "redis" },
   sqlite: { type: "sqlite", port: 0, user: "", label: "SQLite", icon: "sqlite" },
   rqlite: { type: "rqlite", port: 4001, user: "", label: "RQLite", icon: "rqlite" },
@@ -1133,6 +1162,7 @@ const driverProfiles: Record<
   trino: { type: "trino", port: 8080, user: "", label: "Trino", icon: "trino" },
   prestosql: { type: "prestosql", port: 8080, user: "", label: "PrestoSQL", icon: "presto" },
   hive: { type: "hive", port: 10000, user: "", label: "Apache Hive", icon: "hive" },
+  impala: { type: "impala", port: 21050, user: "", label: "Apache Impala", icon: "impala", urlParams: "auth=noSasl" },
   spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark" },
   db2: { type: "db2", port: 50000, user: "db2inst1", label: "IBM DB2", icon: "db2" },
   informix: { type: "informix", port: 9088, user: "informix", label: "Informix", icon: "informix" },
@@ -2386,7 +2416,7 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.url_params = "";
     }
-    resetHiveKerberosFields(profile.type === "hive" ? form.value : undefined);
+    resetHiveKerberosFields(profile.type === "hive" || profile.type === "impala" ? form.value : undefined);
   }
 }
 
@@ -2512,7 +2542,7 @@ watch(
         resetVictoriaMetricsFields();
       }
       resetElasticsearchProxyFields(config.db_type === "elasticsearch" ? config.external_config : undefined);
-      resetHiveKerberosFields(config.db_type === "hive" ? config : undefined);
+      resetHiveKerberosFields(config.db_type === "hive" || config.db_type === "impala" ? config : undefined);
       resetDamengJvmOptions(config.db_type === "dameng" ? config : undefined);
       h2ConnectionMode.value = h2ConnectionModeForConfig(config);
       customColorInput.value = config.color || "";
@@ -2698,6 +2728,7 @@ const iconTypeMap: Record<string, string> = {
   mysql: "mysql",
   postgres: "postgres",
   cloudberry: "cloudberry",
+  opentenbase: "opentenbase",
   sqlite: "sqlite",
   rqlite: "rqlite",
   turso: "turso",
@@ -2766,6 +2797,7 @@ const iconTypeMap: Record<string, string> = {
   trino: "trino",
   prestosql: "prestosql",
   hive: "hive",
+  impala: "impala",
   spark: "spark",
   db2: "db2",
   informix: "informix",
@@ -2790,6 +2822,7 @@ const iconTypeMap: Record<string, string> = {
 const dbOptions: DbOption[] = [
   { value: "postgres", label: "PostgreSQL" },
   { value: "cloudberry", label: "Apache Cloudberry" },
+  { value: "opentenbase", label: "OpenTenBase" },
   { value: "mysql", label: "MySQL" },
   { value: "mongodb", label: "MongoDB" },
   { value: "redis", label: "Redis" },
@@ -2846,6 +2879,7 @@ const dbOptions: DbOption[] = [
   { value: "trino", label: "Trino" },
   { value: "prestosql", label: "PrestoSQL" },
   { value: "hive", label: "Hive" },
+  { value: "impala", label: "Apache Impala" },
   { value: "spark", label: "Apache Spark" },
   { value: "db2", label: "DB2" },
   { value: "informix", label: "Informix" },
@@ -2891,12 +2925,12 @@ const dbCategoryDefinitions: Array<{
   {
     key: "analytics",
     titleKey: "connection.databaseCategoryAnalytics",
-    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "spark", "bigquery", "kylin", "dremio"],
+    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "impala", "spark", "bigquery", "kylin", "dremio"],
   },
   {
     key: "domestic",
     titleKey: "connection.databaseCategoryDomestic",
-    optionValues: ["dm", "opengauss", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "uxdb", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
+    optionValues: ["dm", "opengauss", "opentenbase", "gaussdb", "kwdb", "tidb", "oceanbase", "goldendb", "tdsql", "polardb", "greatsql", "gbase", "kingbase", "highgo", "uxdb", "yashandb", "vastbase", "sundb", "oscar", "xugu"],
   },
   {
     key: "lightweight",
@@ -3062,6 +3096,11 @@ const showGenericUrlParamsHint = computed(() => form.value.db_type === "mysql" |
 const bareMysqlProfiles = new Set(["doris", "selectdb", "oceanbase"]);
 const supportsMysqlTlsOptions = computed(() => form.value.db_type === "starrocks" || (form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value)));
 const supportsMysqlCleartextPasswordAuth = computed(() => form.value.db_type === "mysql" && !bareMysqlProfiles.has(selectedType.value));
+const supportsDoltSystemTables = computed(() => isDoltDriverProfile(form.value.driver_profile));
+const showDoltSystemTables = computed({
+  get: () => doltSystemTablesVisible(form.value),
+  set: (visible: boolean) => setDoltSystemTablesVisible(form.value, visible),
+});
 const mysqlCleartextPasswordAuth = computed({
   get: () => mysqlCleartextPasswordAuthEnabled(form.value.url_params),
   set: (value: boolean) => {
@@ -3728,7 +3767,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.ssl = !!config.ssl || damengSsl.enabled;
     config.url_params = applyDamengSslUrlParams(config.url_params, config.ssl, damengSsl.sslFilesPath, damengSsl.sslKeystorePassword, damengSsl.sslProtocol);
   }
-  if (config.db_type === "hive") {
+  if (config.db_type === "hive" || config.db_type === "impala") {
     if (hiveAuthMode.value === "kerberos" && !hivePrincipal.value.trim()) {
       throw new Error(t("connection.hiveKerberosPrincipalRequired"));
     }
@@ -3857,9 +3896,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);
+    const targetServerType = gaussdbTargetServerType(config);
     config.external_config = undefined;
     setGaussdbIdentifierQuoteStyle(config, style);
-  } else {
+    setGaussdbTargetServerType(config, targetServerType);
+  } else if (!isDoltDriverProfile(config.driver_profile)) {
     config.external_config = undefined;
   }
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
@@ -6998,7 +7039,7 @@ function openExternalUrl(url: string) {
                     <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.oracleTnsPathHint") }}</p>
                   </div>
 
-                  <template v-if="form.db_type === 'hive'">
+                  <template v-if="form.db_type === 'hive' || form.db_type === 'impala'">
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.hiveAuthMode") }}</Label>
                       <div class="col-span-3 grid h-8 grid-cols-2 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
@@ -7020,7 +7061,7 @@ function openExternalUrl(url: string) {
                     <template v-if="hiveAuthMode === 'kerberos'">
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelSmallClass">{{ t("connection.hivePrincipal") }}</Label>
-                        <Input v-model="hivePrincipal" class="col-span-3" placeholder="hive/_HOST@EXAMPLE.COM" />
+                        <Input v-model="hivePrincipal" class="col-span-3" :placeholder="form.db_type === 'impala' ? 'impala/_HOST@EXAMPLE.COM' : 'hive/_HOST@EXAMPLE.COM'" />
                       </div>
                       <div class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelSmallClass">krb5.conf</Label>
@@ -7780,6 +7821,24 @@ function openExternalUrl(url: string) {
                     <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.gaussdbIdentifierQuoteHint") }}</p>
                   </div>
                 </div>
+                <div v-if="isGaussdbMJdbcConnection" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbTargetServerType") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbTargetServerTypeComputed">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="master">{{ t("connection.gaussdbTargetServerTypeMaster") }}</SelectItem>
+                        <SelectItem value="slave">{{ t("connection.gaussdbTargetServerTypeSlave") }}</SelectItem>
+                        <SelectItem value="any">{{ t("connection.gaussdbTargetServerTypeAny") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">
+                      {{ t("connection.gaussdbTargetServerTypeHint") }}
+                    </p>
+                  </div>
+                </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
                   <div class="col-span-3 grid grid-cols-2 gap-2">
@@ -7865,6 +7924,13 @@ function openExternalUrl(url: string) {
                     <Switch v-model="keepaliveEnabled" />
                     <Input v-model.number="form.keepalive_interval_secs" type="number" min="1" max="3600" step="1" class="flex-1" :disabled="!keepaliveEnabled" />
                   </div>
+                </div>
+                <div v-if="supportsDoltSystemTables" class="grid grid-cols-4 items-center gap-4">
+                  <Label :class="connectionLabelSmallClass">{{ t("connection.doltShowSystemTables") }}</Label>
+                  <label class="col-span-3 flex items-center gap-2 cursor-pointer">
+                    <input v-model="showDoltSystemTables" type="checkbox" class="mr-0" />
+                    <span class="text-xs text-muted-foreground">{{ t("connection.doltShowSystemTablesHint") }}</span>
+                  </label>
                 </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.readOnly") }}</Label>
@@ -8238,7 +8304,7 @@ function openExternalUrl(url: string) {
           <div class="flex items-center justify-between gap-3">
             <div class="min-w-0">
               <div class="truncate text-sm font-medium">{{ agentInstallLabel || agentInstallDriverKey }}</div>
-              <div class="mt-1 text-xs text-muted-foreground">{{ agentInstallProgressLabel }}</div>
+              <div class="mt-1 text-xs text-muted-foreground tabular-nums">{{ agentInstallProgressLabel }}</div>
             </div>
             <Loader2 v-if="agentInstallRunning && !agentInstallError" class="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
           </div>
