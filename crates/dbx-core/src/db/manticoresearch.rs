@@ -209,6 +209,7 @@ fn index_info_from_row(row: &mysql_async::Row) -> IndexInfo {
         index_type: Some(get_str_by_name(row, "Type")),
         included_columns: None,
         comment: (!comment_parts.is_empty()).then(|| comment_parts.join(", ")),
+        key_is_expression: Vec::new(),
     }
 }
 

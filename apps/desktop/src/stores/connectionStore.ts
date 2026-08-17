@@ -53,6 +53,7 @@ import {
   collapseAllGroups as collapseAllGroupsOp,
   moveConnectionToGroup as moveConnectionToGroupOp,
   remapSidebarLayoutConnectionIds,
+  mergeSidebarLayout,
   reorderEntry as reorderEntryOp,
   buildConnectionGroupPathMap,
   connectionSidebarSearchAliases,
@@ -119,7 +120,7 @@ import { appendConnectionErrorHints, isMysqlMissingPasswordFailure } from "@/lib
 import { connectionNeedsPasswordPrompt } from "@/lib/connection/connectionPassword";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
-import { isXuguPublicSynonymScope, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
+import { isXuguPublicSynonymScope, sortXuguSchemaInfos, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
@@ -197,6 +198,19 @@ function sidebarObjectGroupPageSize(): number {
   const size = settingsStore.desktopSettings.sidebar_table_page_size;
   return typeof size === "number" && size > 0 ? size : 500;
 }
+
+/**
+ * Upper bound for a single remote fuzzy table-search result set.
+ *
+ * Every fuzzy match travels database → IPC → store → tree rendering, so an
+ * unbounded result set (e.g. a single-letter query against a large schema)
+ * would push thousands of rows through the whole pipeline. The budget is 4×
+ * the default page size (500) and comfortably covers the reported #6190
+ * schema (801 fuzzy matches) while keeping a single IPC payload bounded.
+ * Queries whose fuzzy match set exceeds the budget are truncated; narrowing
+ * the query reaches later tables.
+ */
+export const SIDEBAR_TABLE_SEARCH_RESULT_BUDGET = 2000;
 
 function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   if (!config || config.db_type !== "mq") return false;
@@ -1095,6 +1109,7 @@ export const useConnectionStore = defineStore("connection", () => {
       trino: "Trino",
       prestosql: "PrestoSQL",
       hive: "Hive",
+      kyuubi: "Apache Kyuubi",
       impala: "Apache Impala",
       spark: "Apache Spark",
       db2: "DB2",
@@ -1542,6 +1557,18 @@ export const useConnectionStore = defineStore("connection", () => {
     return sidebarObjectKindsForDatabase(dbType);
   }
 
+  function sidebarObjectTypesForScope(config: ConnectionConfig | undefined, schema?: string): DatabaseObjectTreeKind[] {
+    if (config?.db_type === "xugu" && isXuguPublicSynonymScope(schema)) {
+      return ["SYNONYM"];
+    }
+    return supportedSidebarObjectTypes(config);
+  }
+
+  function objectTreeCacheVersion(config: ConnectionConfig | undefined, schema: string | undefined, baseVersion: string): string {
+    const scopedVersion = config?.db_type === "xugu" && isXuguPublicSynonymScope(schema) ? `${baseVersion}-public-synonyms` : baseVersion;
+    return ownerAwareMetadataCacheVersion(config, scopedVersion);
+  }
+
   function sortSidebarSchemaInfos(schemas: readonly SchemaInfo[]): SchemaInfo[] {
     const byName = new Map<string, SchemaInfo>();
     for (const schema of schemas) {
@@ -1549,7 +1576,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (!name) continue;
       byName.set(name, { name, comment: schema.comment ?? null });
     }
-    return sortSidebarNames([...byName.keys()]).map((name) => byName.get(name)!);
+    return sortXuguSchemaInfos([...byName.values()], compareSidebarNames);
   }
 
   function buildExtensionManagementNode(connectionId: string, database: string): TreeNode {
@@ -1569,7 +1596,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const objectTreeProfileCacheKey = driverProfileObjectTreeProfileForConnection(config)?.cacheKey;
     // objects-v8: object-group listing SQL gained a pg_type branch for
     // PostgreSQL-family user-defined types; older cached lists miss TYPE nodes.
-    const baseCacheVersion = ownerAwareMetadataCacheVersion(config, config?.db_type === "oracle" ? "objects-v7" : "objects-v8");
+    const baseCacheVersion = objectTreeCacheVersion(config, node.schema, config?.db_type === "oracle" ? "objects-v7" : "objects-v8");
     const cacheVersion = objectTreeProfileCacheKey ? `${baseCacheVersion}:${objectTreeProfileCacheKey}` : baseCacheVersion;
     return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, cacheVersion);
   }
@@ -1842,7 +1869,14 @@ export const useConnectionStore = defineStore("connection", () => {
       catalog: options.node.catalog,
     });
     const tableNameFilter = effectiveTableNameFilterForNode(options.node, userTableNameFilter);
-    const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
+    // A search must never truncate the fuzzy result set to the first page: the
+    // target table can sort beyond it (e.g. "T_Erp_Nc_SuPlan_List" for
+    // "erpncs" in a large ERP schema), which silently drops it from the first
+    // search even though later, narrower queries succeed. Results are bounded
+    // by SIDEBAR_TABLE_SEARCH_RESULT_BUDGET so a wide fuzzy query cannot push
+    // an unbounded result set through database → IPC → store → tree rendering.
+    // Unfiltered loads keep the page+1 probe used for load-more detection.
+    const fetchLimit = searchFilter ? SIDEBAR_TABLE_SEARCH_RESULT_BUDGET : options.pageSize + 1;
     const fetchOffset = searchFilter ? undefined : options.offset;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
       metadataListCacheScope({
@@ -1951,7 +1985,11 @@ export const useConnectionStore = defineStore("connection", () => {
       schema: options.effectiveSchema ?? options.querySchema,
       nodeKind: "simple-tables",
     });
-    const fetchLimit = searchFilter ? options.pageSize : options.pageSize + 1;
+    // A search must never truncate the fuzzy result set to the first page (see
+    // loadPagedTableGroupChildren); results are bounded by
+    // SIDEBAR_TABLE_SEARCH_RESULT_BUDGET, and unfiltered loads keep the
+    // page+1 probe.
+    const fetchLimit = searchFilter ? SIDEBAR_TABLE_SEARCH_RESULT_BUDGET : options.pageSize + 1;
     const fetchOffset = searchFilter ? undefined : options.offset;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
       metadataListCacheScope({
@@ -3357,8 +3395,12 @@ export const useConnectionStore = defineStore("connection", () => {
     invalidateObjectBrowserRowsCache({ connectionId, database });
   }
 
-  async function ensureConnected(connectionId: string, options: { activate?: boolean } = {}) {
+  async function ensureConnected(connectionId: string, options: { activate?: boolean; verifyHealth?: boolean } = {}) {
     if (connectedIds.value.has(connectionId)) {
+      // Pure navigation can safely trust the existing connected state. Its
+      // destination will perform the real API request, while blocking here on
+      // a health probe makes an otherwise local tab switch take up to 5s.
+      if (options.verifyHealth === false) return;
       if (hasRecentConnectionHealthCheck(connectionId)) return;
       // Optimistic: verify backend pool is actually healthy
       try {
@@ -3755,9 +3797,14 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "elasticsearch", "easysearch", "meilisearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
-    if (!node || node.type !== "connection" || node.isLoading || hasConnectionMetadataChildren(node.children)) return;
+    if (!node || node.type !== "connection" || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
-    if (metadataLoadCoordinator.has(scope)) return;
+    const inFlight = metadataLoadCoordinator.inFlightPromise<void>(scope);
+    if (inFlight) {
+      await inFlight;
+      return;
+    }
+    if (node.isLoading) return;
 
     const wasExpanded = !!node.isExpanded;
     const load = beginTreeNodeLoad(node);
@@ -4049,7 +4096,8 @@ export const useConnectionStore = defineStore("connection", () => {
       load = reclaimTreeNodeLoad(load, node);
       if (useCachedChildren(node, options, load)) return;
 
-      const namespaces = normalizeNacosNamespacesForDisplay(await api.nacosListNamespaces(connectionId));
+      const sidebarSnapshot = await api.nacosSidebarSnapshot(connectionId);
+      const namespaces = normalizeNacosNamespacesForDisplay(sidebarSnapshot.namespaces);
       const visibleNamespaces = filterNacosNamespacesForSidebar(namespaces, getConfig(connectionId)?.visible_databases);
       const sorted = [...visibleNamespaces].sort((left, right) => {
         const leftLabel = left.namespaceShowName || left.namespace || "public";
@@ -4062,9 +4110,8 @@ export const useConnectionStore = defineStore("connection", () => {
         connectionId,
         namespaces.map((namespace) => namespace.namespace),
       );
-      setChildren(
-        targetNode,
-        sorted.map((namespace) => {
+      const children: TreeNode[] = [
+        ...sorted.map((namespace) => {
           const value = namespace.namespace || "";
           const label = namespace.namespaceShowName || value || "public";
           return {
@@ -4078,7 +4125,19 @@ export const useConnectionStore = defineStore("connection", () => {
             objectCount: namespace.configCount,
           };
         }),
-      );
+      ];
+      if (sidebarSnapshot.accessControl.listUsers.supported === true || sidebarSnapshot.accessControl.listRoleBindings.supported === true) {
+        children.push({
+          id: `${connectionId}:nacos-access-control`,
+          label: "nacos.accessControlSidebarLabel",
+          type: "nacos-access-control" as const,
+          connectionId,
+          database: "",
+          isExpanded: false,
+          children: [],
+        });
+      }
+      setChildren(targetNode, children);
       targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e, load);
@@ -4347,7 +4406,9 @@ export const useConnectionStore = defineStore("connection", () => {
           if (useCachedChildren(node, options, load)) return;
           const config = getConfig(connectionId);
           const showSystemSchemas = config?.show_system_schemas === true;
-          const cacheVersion = ownerAwareMetadataCacheVersion(config, config?.db_type === "xugu" ? "schemas-v4" : "schemas-v3");
+          // schemas-v5 invalidates cached children created before the public
+          // synonym scope was placed after all real schemas.
+          const cacheVersion = ownerAwareMetadataCacheVersion(config, config?.db_type === "xugu" ? "schemas-v5" : "schemas-v3");
           const cacheKey = schemaCacheKey(connectionId, database, cacheVersion, showSystemSchemas ? "show-system" : "hide-system");
           if (!options?.force) {
             const cached = await loadPersistedTreeChildren(node, cacheKey, load);
@@ -4638,6 +4699,8 @@ export const useConnectionStore = defineStore("connection", () => {
     const configForScope = getConfig(connectionId);
     const simpleObjectDisplayForScope = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
     const objectTypesForScope = simpleObjectDisplayForScope ? supportedSidebarObjectTypes(configForScope) : undefined;
+    const searchFilterForScope = activeTreeLoadSearchFilter(options);
+    const pageSizeForScope = sidebarObjectGroupPageSize();
     return runTreeMetadataLoad(
       {
         kind: "schema-tables",
@@ -4646,8 +4709,8 @@ export const useConnectionStore = defineStore("connection", () => {
         schema: undefined,
         nodeKind: "database",
         objectTypes: objectTypesForScope,
-        searchFilter: activeTreeLoadSearchFilter(options),
-        limit: simpleObjectDisplayForScope ? sidebarObjectGroupPageSize() + 1 : undefined,
+        searchFilter: searchFilterForScope,
+        limit: simpleObjectDisplayForScope ? (searchFilterForScope ? SIDEBAR_TABLE_SEARCH_RESULT_BUDGET : pageSizeForScope + 1) : undefined,
         offset: 0,
         sidebarDisplayMode: simpleObjectDisplayForScope ? "simple" : "grouped",
         driverProfile: metadataDriverProfile(configForScope),
@@ -4674,8 +4737,8 @@ export const useConnectionStore = defineStore("connection", () => {
               return;
             }
           }
-          const pageSize = sidebarObjectGroupPageSize();
-          const fetchLimit = searchFilter ? pageSize : pageSize + 1;
+          const pageSize = pageSizeForScope;
+          const fetchLimit = searchFilter ? SIDEBAR_TABLE_SEARCH_RESULT_BUDGET : pageSize + 1;
           const fetchOffset = searchFilter ? undefined : 0;
           const tables = await withMetadataLoadTimeout(connectionId, listTablesWithOptionalTableNameFilter(connectionId, database, "", searchFilter, fetchLimit, fetchOffset, objectTypesForScope, catalog, tableNameFilter), "tables");
           const hasMore = searchFilter ? false : tables.length > pageSize;
@@ -4717,7 +4780,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadTables(connectionId: string, database: string, schema?: string, options?: LoadTreeOptions) {
     const configForScope = getConfig(connectionId);
     const simpleObjectDisplayForScope = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-    const objectTypesForScope = simpleObjectDisplayForScope ? supportedSidebarObjectTypes(configForScope) : undefined;
+    const objectTypesForScope = simpleObjectDisplayForScope ? sidebarObjectTypesForScope(configForScope, schema) : undefined;
     const searchFilter = activeTreeLoadSearchFilter(options);
     const querySchemaForScope = connectionObjectTreeQuerySchema(configForScope, database, schema);
     const effectiveSchemaForScope = connectionObjectTreeNodeSchema(configForScope, database, schema);
@@ -4729,7 +4792,7 @@ export const useConnectionStore = defineStore("connection", () => {
     });
     if (!options?.force && simpleObjectDisplayForScope && !searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilterForScope) {
       const nodeId = schema ? `${connectionId}:${database}:${schema}` : `${connectionId}:${database}`;
-      const cacheKey = schemaCacheKey(connectionId, database, schema || "", ownerAwareMetadataCacheVersion(configForScope, "objects-simple-v8"));
+      const cacheKey = schemaCacheKey(connectionId, database, schema || "", objectTreeCacheVersion(configForScope, schema, "objects-simple-v8"));
       if (await hydrateTreeNodeFromCache(findNode(treeNodes.value, nodeId), cacheKey)) {
         void loadTables(connectionId, database, schema, { ...options, force: true }).catch(() => undefined);
         return;
@@ -4763,7 +4826,8 @@ export const useConnectionStore = defineStore("connection", () => {
           const searchFilter = activeTreeLoadSearchFilter(options);
           const config = getConfig(connectionId);
           const objectTreeProfile = driverProfileObjectTreeProfileForConnection(config);
-          const baseCacheVersion = ownerAwareMetadataCacheVersion(config, simpleObjectDisplay ? "objects-simple-v8" : "objects-grouped-v8");
+          const isPublicSynonymScope = config?.db_type === "xugu" && isXuguPublicSynonymScope(schema);
+          const baseCacheVersion = objectTreeCacheVersion(config, schema, simpleObjectDisplay ? "objects-simple-v8" : "objects-grouped-v8");
           const cacheVersion = !simpleObjectDisplay && objectTreeProfile?.cacheKey ? `${baseCacheVersion}:${objectTreeProfile.cacheKey}` : baseCacheVersion;
           const cacheKey = schemaCacheKey(connectionId, database, schema || "", cacheVersion);
           const querySchema = connectionObjectTreeQuerySchema(config, database, schema);
@@ -4783,10 +4847,10 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
 
-          const nonTableObjectTypes = simpleObjectDisplay ? supportedSidebarObjectTypes(config).filter((objectType) => objectType !== "TABLE") : [];
+          const nonTableObjectTypes = simpleObjectDisplay ? sidebarObjectTypesForScope(config, schema).filter((objectType) => objectType !== "TABLE") : [];
           let children: TreeNode[];
           let nextObjectCount: number | undefined;
-          if (simpleObjectDisplay) {
+          if (simpleObjectDisplay && !isPublicSynonymScope) {
             const pageSize = sidebarObjectGroupPageSize();
             const page = await loadPagedSimpleTableChildren({
               nodeId,
@@ -4802,13 +4866,19 @@ export const useConnectionStore = defineStore("connection", () => {
             });
             children = page.hasMore && !searchFilter ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, pageSize), page.loadMoreParent) : page.children;
             nextObjectCount = page.objectCount;
+          } else if (simpleObjectDisplay) {
+            // The synthetic public scope contains no tables. Avoid issuing a
+            // table-list query against the protocol namespace; supplemental
+            // object loading below will add only its SYNONYM entries.
+            children = [];
+            nextObjectCount = 0;
           } else {
             children = buildObjectGroupPlaceholderNodes({
               nodeId,
               connectionId,
               database,
               schema: effectiveSchema,
-              objectTypes: supportedSidebarObjectTypes(config),
+              objectTypes: sidebarObjectTypesForScope(config, schema),
               groupOverrides: objectTreeProfile?.groupOverrides,
             });
             if (!schema && isPostgresLikeForExtensions(config?.db_type)) {
@@ -7788,7 +7858,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function applySidebarLayout(layout: SidebarLayout) {
     const reconciledLayout = reconcileLayout(
       connections.value.map((c) => c.id),
-      layout,
+      mergeSidebarLayout(sidebarLayout.value, layout),
     );
     updateLayoutAndRebuild(reconciledLayout);
   }

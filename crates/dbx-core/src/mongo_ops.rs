@@ -1846,6 +1846,7 @@ for line in sys.stdin:
                     index_type: Some("_id: 1".to_string()),
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 },
                 IndexInfo {
                     name: "email_1".to_string(),
@@ -1856,6 +1857,7 @@ for line in sys.stdin:
                     index_type: Some("email: 1".to_string()),
                     included_columns: None,
                     comment: None,
+                    key_is_expression: Vec::new(),
                 },
             ],
             1,

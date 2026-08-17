@@ -5281,7 +5281,8 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              am.amname AS index_type, \
              ix.indnkeyatts AS nkeyatts, \
              ix.indkey AS indkey, \
-             obj_description(i.oid, 'pg_class') AS index_comment \
+             obj_description(i.oid, 'pg_class') AS index_comment, \
+             array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -5309,7 +5310,16 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              am.amname AS index_type, \
              NULL::smallint AS nkeyatts, \
              ix.indkey AS indkey, \
-             obj_description(i.oid, 'pg_class') AS index_comment \
+             obj_description(i.oid, 'pg_class') AS index_comment, \
+             ARRAY( \
+               SELECT a.attname IS NULL \
+               FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
+               LEFT JOIN pg_attribute a \
+                 ON a.attrelid = t.oid \
+                AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 \
+                AND a.attnum > 0 \
+               ORDER BY pos.n \
+             ) AS key_is_expression \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -5385,6 +5395,11 @@ async fn list_indexes_with_sql(
             let split_at = nkeyatts.min(all_cols.len());
             let key_cols = all_cols[..split_at].to_vec();
             let included = if split_at < all_cols.len() { all_cols[split_at..].to_vec() } else { vec![] };
+            // `a.attname IS NULL` at a given key position means that key part came back from
+            // pg_get_indexdef (a functional/expression key part), not from a real column (#6295).
+            let all_is_expr: Vec<bool> = row.try_get::<_, Vec<bool>>(9).unwrap_or_default();
+            let key_is_expression =
+                if all_is_expr.len() == all_cols.len() { all_is_expr[..split_at].to_vec() } else { Vec::new() };
             IndexInfo {
                 name: pg_row_try_string(row, 0),
                 columns: key_cols,
@@ -5394,6 +5409,7 @@ async fn list_indexes_with_sql(
                 index_type: row.try_get::<_, Option<String>>(5).ok().flatten(),
                 included_columns: if included.is_empty() { None } else { Some(included) },
                 comment: row.try_get::<_, Option<String>>(8).ok().flatten(),
+                key_is_expression,
             }
         })
         .collect())
@@ -8430,6 +8446,15 @@ mod tests {
         assert!(!POSTGRES_INDEXES_COMPAT_SQL.contains("WITH ORDINALITY"));
         assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("generate_series"));
         assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("string_to_array(ix.indkey::text, ' ')"));
+    }
+
+    #[test]
+    fn postgres_index_metadata_tracks_expression_key_provenance() {
+        // #6295 fix: each index key part's `a.attname IS NULL` tags whether it came from a real
+        // column or from pg_get_indexdef, so DDL generation never has to guess from the text.
+        assert!(POSTGRES_INDEXES_SQL.contains("array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression"));
+        assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("SELECT a.attname IS NULL"));
+        assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("AS key_is_expression"));
     }
 
     #[test]

@@ -117,6 +117,20 @@ describe("queryStore switchTab", () => {
     expect(queryStore.tabs[1].catalog).toBe("paimon_catalog");
   });
 
+  it("clones result column comments when duplicating a query tab", () => {
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", undefined, "query", undefined, "SELECT 1");
+    const original = queryStore.tabs.find((tab) => tab.id === tabId)!;
+    original.resultColumnComments = ["identifier", "display name"];
+
+    queryStore.duplicateTab(tabId);
+
+    const duplicate = queryStore.tabs[1];
+    expect(Array.isArray(duplicate.resultColumnComments)).toBe(true);
+    expect(duplicate.resultColumnComments).toEqual(original.resultColumnComments);
+    expect(duplicate.resultColumnComments).not.toBe(original.resultColumnComments);
+  });
+
   it("switches catalog and database as one query context", () => {
     const queryStore = useQueryStore();
     const tabId = queryStore.createTab("sr-1", "internal_db", undefined, "query");

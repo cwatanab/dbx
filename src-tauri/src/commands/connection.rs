@@ -1259,7 +1259,7 @@ async fn test_connection_with_info_inner(
             DatabaseType::Nacos => {
                 let admin_config = state.nacos_admin_config_for_connection(connection_id, &config).await?;
                 let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
-                adapter.test_connection().await?;
+                adapter.test_connection_with_scope_validation().await?;
                 Ok("Connection successful".to_string())
             }
             DatabaseType::Consul => {
@@ -1386,6 +1386,7 @@ pub async fn connect_db(
     let mut connected_db_config = db_config.clone();
 
     state.remove_connection_pools_detached(&id).await;
+    drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
 
     let (host, port) = state.connection_host_port(&id, &db_config).await?;

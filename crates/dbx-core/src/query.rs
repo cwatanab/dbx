@@ -1521,6 +1521,22 @@ where
     }
 }
 
+/// Locks a mutex-guarded shared connection (e.g. SQL Server's single connection
+/// per pool key) and reports how long the caller waited for the lock alongside
+/// the guard. Callers should fold the returned wait time into any execution-time
+/// metric they report, since a driver-level timer that only starts once the lock
+/// is held cannot see time spent queued behind another operation on the same
+/// connection.
+async fn lock_shared_client_with_wait<'a, T>(
+    client: &'a Arc<tokio::sync::Mutex<T>>,
+    cancel_token: Option<CancellationToken>,
+    timeout_duration: Option<Duration>,
+) -> Result<(tokio::sync::MutexGuard<'a, T>, u128), String> {
+    let started_at = std::time::Instant::now();
+    let guard = wait_for_value_opt(cancel_token, timeout_duration, client.lock()).await?;
+    Ok((guard, started_at.elapsed().as_millis()))
+}
+
 async fn sqlserver_pool_is_current(
     state: &AppState,
     pool_key: &str,
@@ -1830,14 +1846,11 @@ async fn do_execute_typed(
             let max_rows = options.max_rows;
             let execution_mode = options.execution_mode;
             drop(connections);
-            let mut client = match cancel_token.as_ref() {
-                Some(token) => tokio::select! {
-                    biased;
-                    _ = token.cancelled() => return Err(canceled_error().into()),
-                    guard = client.lock() => guard,
-                },
-                None => client.lock().await,
-            };
+            let (mut client, lock_wait_ms) =
+                match lock_shared_client_with_wait(&client, cancel_token.clone(), None).await {
+                    Ok(value) => value,
+                    Err(err) => return Err(err.into()),
+                };
             let execution = async {
                 if execution_mode == QueryExecutionMode::Simple {
                     let mut results =
@@ -1849,7 +1862,11 @@ async fn do_execute_typed(
             };
             let result = wait_for_query_opt(cancel_token, query_timeout, execution)
                 .await
-                .map(|result| truncate_result_with_max_rows(result, max_rows));
+                .map(|result| truncate_result_with_max_rows(result, max_rows))
+                .map(|mut result| {
+                    result.execution_time_ms += lock_wait_ms;
+                    result
+                });
             drop(client);
             if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
                 state.remove_pool_by_key(pool_key).await;
@@ -3152,17 +3169,18 @@ async fn execute_multi_sqlserver(
         };
         drop(connections);
 
-        let mut client_guard = match wait_for_value_opt(cancel_token.clone(), query_timeout, client.lock()).await {
-            Ok(guard) => guard,
-            Err(err) => {
-                all_results.push(ExecuteMultiResult::execution_error_with_backend(
-                    error_query_result(err.clone()),
-                    None,
-                    crate::backend_error::BackendError::from_legacy_backend(&err),
-                ));
-                break;
-            }
-        };
+        let (mut client_guard, lock_wait_ms) =
+            match lock_shared_client_with_wait(&client, cancel_token.clone(), query_timeout).await {
+                Ok(value) => value,
+                Err(err) => {
+                    all_results.push(ExecuteMultiResult::execution_error_with_backend(
+                        error_query_result(err.clone()),
+                        None,
+                        crate::backend_error::BackendError::from_legacy_backend(&err),
+                    ));
+                    break;
+                }
+            };
 
         if !sqlserver_pool_is_current(state, pool_key, &client).await {
             let error = "SQL Server connection was reset while waiting for the query lock; please retry.".to_string();
@@ -3185,7 +3203,10 @@ async fn execute_multi_sqlserver(
         drop(client_guard);
 
         match result {
-            Ok(results) => all_results.extend(sqlserver_batch_results(results)),
+            Ok(results) => all_results.extend(sqlserver_batch_results(results).into_iter().map(|mut item| {
+                item.result.execution_time_ms += lock_wait_ms;
+                item
+            })),
             Err(e) => {
                 let action = pool_error_action(Some(DatabaseType::SqlServer), &e);
                 all_results.push(ExecuteMultiResult::execution_error_with_backend(
@@ -6182,6 +6203,44 @@ for line in sys.stdin:
 
         let serialized = serde_json::to_value(&results[1]).unwrap();
         assert_eq!(serialized.get("server_message"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    // Regression test for #6097: SQL Server queries share a single mutex-guarded
+    // connection (see PoolKind::SqlServer), so a fast query can queue for seconds
+    // behind another operation (e.g. autocomplete/schema metadata) holding that
+    // same connection. Before this fix, `execution_time_ms` was measured only
+    // from inside db::sqlserver's own timers, which start *after* the lock is
+    // acquired — so that queueing time was invisible to the user, producing a
+    // reported duration (e.g. "6-8ms") wildly smaller than what they actually
+    // waited (e.g. "10s"). `lock_shared_client_with_wait` is the exact helper
+    // both PoolKind::SqlServer call sites now use to fold that wait back in.
+    #[tokio::test]
+    async fn lock_shared_client_with_wait_reports_time_queued_behind_another_holder() {
+        let client = Arc::new(tokio::sync::Mutex::new(0u8));
+        let holder_guard = client.lock().await;
+
+        let waiter_client = client.clone();
+        let waiter = tokio::spawn(async move {
+            let (_guard, wait_ms) = lock_shared_client_with_wait(&waiter_client, None, None).await.unwrap();
+            wait_ms
+        });
+
+        // Give the spawned task a chance to actually start waiting on the lock
+        // before the holder releases it, so the measured wait is meaningful.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(holder_guard);
+
+        let wait_ms = waiter.await.unwrap();
+        assert!(wait_ms >= 150, "expected queued wait time to be captured, got {wait_ms}ms");
+    }
+
+    #[tokio::test]
+    async fn lock_shared_client_with_wait_is_near_zero_when_uncontended() {
+        let client = Arc::new(tokio::sync::Mutex::new(0u8));
+
+        let (_guard, wait_ms) = lock_shared_client_with_wait(&client, None, None).await.unwrap();
+
+        assert!(wait_ms < 50, "expected an uncontended lock to report negligible wait, got {wait_ms}ms");
     }
 
     #[test]

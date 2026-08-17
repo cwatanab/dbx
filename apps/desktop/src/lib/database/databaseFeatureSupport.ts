@@ -131,6 +131,11 @@ export function supportsSqlInListPaste(dbType?: DatabaseType): boolean {
   return supportsSqlFileExecution(dbType) && !NON_SQL_IN_LIST_PASTE_TYPES.has(dbType);
 }
 
+export function supportsQueryEditorBlockComments(dbType?: DatabaseType): boolean {
+  if (!dbType) return true;
+  return supportsSqlFileExecution(dbType);
+}
+
 export function supportsSchemaDiagram(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "diagram");
 }

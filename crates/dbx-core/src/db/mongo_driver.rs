@@ -821,6 +821,7 @@ fn index_info_from_model(model: IndexModel) -> IndexInfo {
         index_type,
         included_columns: None,
         comment: None,
+        key_is_expression: Vec::new(),
     }
 }
 
@@ -3525,6 +3526,7 @@ mod tests {
             index_type: Some("email: 1".to_string()),
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         });
 
         assert_eq!(spec.name, "email_1");
@@ -3549,6 +3551,7 @@ mod tests {
             index_type: None,
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
         });
 
         assert_eq!(
@@ -3791,6 +3794,7 @@ mod tests {
                 index_type: Some("_id: 1".to_string()),
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             },
             IndexInfo {
                 name: "users_email_unique".to_string(),
@@ -3801,6 +3805,7 @@ mod tests {
                 index_type: Some("email: 1".to_string()),
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             },
             IndexInfo {
                 name: "users_status_idx".to_string(),
@@ -3811,6 +3816,7 @@ mod tests {
                 index_type: Some("status: 1".to_string()),
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
             },
         ];
         let after = vec![before[0].clone(), before[2].clone()];

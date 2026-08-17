@@ -179,8 +179,18 @@ async fn run_temporary_connection_test(
     let temp_id = format!("{TEST_PROBE_ID_PREFIX}{}", uuid::Uuid::new_v4());
     app.configs.write().await.insert(temp_id.clone(), config.clone());
 
-    let pool_result = app.get_or_create_pool(&temp_id, config.database.as_deref()).await;
-    let database_info = if include_database_info {
+    let pool_result = if config.db_type == DatabaseType::Nacos {
+        match app.nacos_admin_config_for_connection(&temp_id, &config).await {
+            Ok(admin_config) => match app.nacos_registry.build_transient_config(admin_config).await {
+                Ok(adapter) => adapter.test_connection_with_scope_validation().await.map(|_| temp_id.clone()),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        }
+    } else {
+        app.get_or_create_pool(&temp_id, config.database.as_deref()).await
+    };
+    let database_info = if include_database_info && config.db_type != DatabaseType::Nacos {
         match &pool_result {
             Ok(_) => match app.connection_database_info(&temp_id, config.database.as_deref()).await {
                 Ok(info) => info,
@@ -299,6 +309,7 @@ pub async fn connect_db(
     }
 
     app.remove_connection_pools_detached(&connection_id).await;
+    app.nacos_registry.drop_connection(&connection_id).await;
     app.reset_connection_transport_for_config(&connection_id, &runtime_config).await;
     app.configs.write().await.insert(connection_id.clone(), runtime_config);
 

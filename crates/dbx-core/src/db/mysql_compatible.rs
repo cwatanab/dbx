@@ -323,6 +323,7 @@ fn table_key_index(name: &str, line: &str, is_unique: bool, is_primary: bool, in
         index_type: Some(index_type.to_string()),
         included_columns: None,
         comment: None,
+        key_is_expression: Vec::new(),
     })
 }
 
@@ -342,6 +343,7 @@ fn secondary_index(line: &str) -> Option<IndexInfo> {
         index_type: mysql_keyword_argument(after_name, "USING").or_else(|| Some("INDEX".to_string())),
         included_columns: None,
         comment: mysql_quoted_string_argument(after_name, "COMMENT"),
+        key_is_expression: Vec::new(),
     })
 }
 

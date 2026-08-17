@@ -5170,6 +5170,7 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                     index_type: Some(get_str_by_name(&row, "INDEX_TYPE")),
                     included_columns: None,
                     comment: get_opt_str(&row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
+                    key_is_expression: Vec::new(),
                 });
                 index_position
             };

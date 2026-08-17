@@ -114,10 +114,19 @@ const filteredGroups = computed<ObjectTreeGroup[]>(() => {
   if (!query) {
     return props.groups;
   }
-  return props.groups.map((g) => ({
-    ...g,
-    items: g.items.filter((name) => name.toLowerCase().includes(query)),
-  }));
+  return props.groups.map((group) => {
+    const prefixMatches: string[] = [];
+    const substringMatches: string[] = [];
+    for (const name of group.items) {
+      const normalizedName = name.toLowerCase();
+      if (normalizedName.startsWith(query)) {
+        prefixMatches.push(name);
+      } else if (normalizedName.includes(query)) {
+        substringMatches.push(name);
+      }
+    }
+    return { ...group, items: [...prefixMatches, ...substringMatches] };
+  });
 });
 
 function selectAllEnabled() {

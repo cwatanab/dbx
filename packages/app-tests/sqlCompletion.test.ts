@@ -19,6 +19,7 @@ import {
 } from "../../apps/desktop/src/lib/sql/sqlCompletion.ts";
 import { sqlCompletionContextFromSemantic } from "../../apps/desktop/src/lib/sql/semantic/completion.ts";
 import { buildSqlSemanticModel } from "../../apps/desktop/src/lib/sql/semantic/model.ts";
+import type { DatabaseType } from "../../apps/desktop/src/types/database.ts";
 
 const tables: SqlCompletionTable[] = [
   { name: "users", schema: "public", type: "table" },
@@ -521,6 +522,63 @@ test("leaves safe MySQL table identifiers unquoted when completion inserts them"
   assert.equal(table?.apply, "article");
 });
 
+test("leaves safe mixed-case MySQL identifiers unquoted when completion inserts them", () => {
+  const schemaSql = "select * from Sales";
+  const schemaItems = buildSqlCompletionItems(schemaSql, schemaSql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    schemas: ["SalesDB"],
+    dialect: "mysql",
+  });
+  assert.equal(schemaItems.find((item) => item.type === "schema" && item.label === "SalesDB")?.apply, "SalesDB.");
+
+  const tableSql = "select * from OrderI";
+  const tableItems = buildSqlCompletionItems(tableSql, tableSql.length, {
+    tables: [{ name: "OrderItems", schema: "SalesDB", type: "table" }],
+    columnsByTable: new Map(),
+    dialect: "mysql",
+  });
+  assert.equal(tableItems.find((item) => item.type === "table" && item.label === "OrderItems")?.apply, "OrderItems");
+
+  const columnSql = "select  from OrderItems";
+  const columnItems = buildSqlCompletionItems(columnSql, "select ".length, {
+    tables: [{ name: "OrderItems", schema: "SalesDB", type: "table" }],
+    columnsByTable: new Map([
+      [
+        "SalesDB.OrderItems",
+        [
+          { name: "MixedCase", table: "OrderItems", schema: "SalesDB", dataType: "int" },
+          { name: "UPPER_COL", table: "OrderItems", schema: "SalesDB", dataType: "int" },
+        ],
+      ],
+    ]),
+    dialect: "mysql",
+  });
+  assert.equal(columnItems.find((item) => item.type === "column" && item.label === "MixedCase")?.apply, "MixedCase");
+  assert.equal(columnItems.find((item) => item.type === "column" && item.label === "UPPER_COL")?.apply, "UPPER_COL");
+});
+
+test("does not reuse MySQL backticks for Caché JDBC completion identifiers", () => {
+  const schemaSql = "select top 100 * from SQL";
+  const schemaItems = buildSqlCompletionItems(schemaSql, schemaSql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    schemas: ["SQLUser"],
+    databaseType: "iris",
+    dialect: "mysql",
+  });
+  assert.equal(schemaItems.find((item) => item.type === "schema" && item.label === "SQLUser")?.apply, "SQLUser.");
+
+  const tableSql = "select top 100 * from SQLUser.PA";
+  const tableItems = buildSqlCompletionItems(tableSql, tableSql.length, {
+    tables: [{ name: "PA_Adm", schema: "SQLUser", type: "table" }],
+    columnsByTable: new Map(),
+    databaseType: "iris",
+    dialect: "mysql",
+  });
+  assert.equal(tableItems.find((item) => item.type === "table" && item.label === "PA_Adm")?.apply, "PA_Adm");
+});
+
 test("quotes MySQL reserved-word column identifiers with backticks when completion inserts them", () => {
   const reservedColumns = ["order", "do", "returning", "ilike", "window", "true"];
   const reservedColumnsByTable = new Map<string, SqlCompletionColumn[]>([["public.bookings", reservedColumns.map((name) => ({ name, table: "bookings", schema: "public", dataType: "text" }))]]);
@@ -535,6 +593,17 @@ test("quotes MySQL reserved-word column identifiers with backticks when completi
     const column = items.find((item) => item.type === "column" && item.label === name);
     assert.equal(column?.apply, `\`${name}\``, `expected reserved column "${name}" to be quoted`);
   }
+});
+
+test("quotes MySQL reserved identifiers case-insensitively", () => {
+  const sql = "select Ord from bookings";
+  const items = buildSqlCompletionItems(sql, "select Ord".length, {
+    tables: [{ name: "bookings", schema: "public", type: "table" }],
+    columnsByTable: new Map([["public.bookings", [{ name: "Order", table: "bookings", schema: "public", dataType: "text" }]]]),
+    dialect: "mysql",
+  });
+
+  assert.equal(items.find((item) => item.type === "column" && item.label === "Order")?.apply, "`Order`");
 });
 
 test("quotes MySQL-only reserved identifiers in schema, table, column, and join completions", () => {
@@ -592,6 +661,106 @@ test("quotes MySQL-only reserved identifiers in schema, table, column, and join 
     dialect: "mysql",
   });
   assert.equal(joinItems.find((item) => item.label === "a.accessible = m.accessible")?.apply, "a.`accessible` = m.`accessible`");
+});
+
+test("does not reuse MySQL backticks for upper-folding schema and table completions", () => {
+  const databaseTypes: DatabaseType[] = ["oracle", "dameng", "oceanbase-oracle", "yashandb", "oscar", "xugu", "db2"];
+
+  for (const databaseType of databaseTypes) {
+    const schemaSql = "select * from SH";
+    const schemaItems = buildSqlCompletionItems(schemaSql, schemaSql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      schemas: ["SHA"],
+      databaseType,
+      dialect: "mysql",
+    });
+    assert.equal(schemaItems.find((item) => item.type === "schema" && item.label === "SHA")?.apply, "SHA.", databaseType);
+
+    const tableSql = "select * from SHA.HOL";
+    const tableItems = buildSqlCompletionItems(tableSql, tableSql.length, {
+      tables: [{ name: "HOLIDAYS", schema: "SHA", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType,
+      dialect: "mysql",
+    });
+    assert.equal(tableItems.find((item) => item.type === "table" && item.label === "HOLIDAYS")?.apply, "HOLIDAYS", databaseType);
+  }
+});
+
+test("uses double quotes for Oracle-like identifiers that require quoting", () => {
+  const schemaSql = "select * from Mixed";
+  const schemaItems = buildSqlCompletionItems(schemaSql, schemaSql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    schemas: ["Mixed Schema"],
+    databaseType: "dameng",
+    dialect: "mysql",
+  });
+  assert.equal(schemaItems.find((item) => item.type === "schema" && item.label === "Mixed Schema")?.apply, '"Mixed Schema".');
+
+  const columnSql = "select SEL from SHA.HOLIDAYS";
+  const columnItems = buildSqlCompletionItems(columnSql, "select SEL".length, {
+    tables: [{ name: "HOLIDAYS", schema: "SHA", type: "table" }],
+    columnsByTable: new Map([["SHA.HOLIDAYS", [{ name: "SELECT", table: "HOLIDAYS", schema: "SHA" }]]]),
+    databaseType: "dameng",
+    dialect: "mysql",
+  });
+  assert.equal(columnItems.find((item) => item.type === "column" && item.label === "SELECT")?.apply, '"SELECT"');
+});
+
+test("quotes mixed-case Dameng schema, table, and column identifiers", () => {
+  const schemaSql = "select * from Mixed";
+  const schemaItems = buildSqlCompletionItems(schemaSql, schemaSql.length, {
+    tables: [],
+    columnsByTable: new Map(),
+    schemas: ["MixedSchema"],
+    databaseType: "dameng",
+    dialect: "mysql",
+  });
+  assert.equal(schemaItems.find((item) => item.type === "schema" && item.label === "MixedSchema")?.apply, '"MixedSchema".');
+
+  const tableSql = "select * from SHA.Mixed";
+  const tableItems = buildSqlCompletionItems(tableSql, tableSql.length, {
+    tables: [{ name: "MixedTable", schema: "SHA", type: "table" }],
+    columnsByTable: new Map(),
+    databaseType: "dameng",
+    dialect: "mysql",
+  });
+  assert.equal(tableItems.find((item) => item.type === "table" && item.label === "MixedTable")?.apply, '"MixedTable"');
+
+  const columnSql = "select Mixed from SHA.HOLIDAYS";
+  const columnItems = buildSqlCompletionItems(columnSql, "select Mixed".length, {
+    tables: [{ name: "HOLIDAYS", schema: "SHA", type: "table" }],
+    columnsByTable: new Map([["SHA.HOLIDAYS", [{ name: "MixedColumn", table: "HOLIDAYS", schema: "SHA" }]]]),
+    databaseType: "dameng",
+    dialect: "mysql",
+  });
+  assert.equal(columnItems.find((item) => item.type === "column" && item.label === "MixedColumn")?.apply, '"MixedColumn"');
+});
+
+test("uses PostgreSQL-style double quotes for PostgreSQL-family completion identifiers", () => {
+  const databaseTypes: DatabaseType[] = ["kingbase", "vastbase", "highgo", "uxdb"];
+
+  for (const databaseType of databaseTypes) {
+    const reservedSql = "select * from SEL";
+    const reservedItems = buildSqlCompletionItems(reservedSql, reservedSql.length, {
+      tables: [{ name: "SELECT", schema: "public", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType,
+      dialect: "mysql",
+    });
+    assert.equal(reservedItems.find((item) => item.type === "table" && item.label === "SELECT")?.apply, '"SELECT"', databaseType);
+
+    const plainSql = "select * from ord";
+    const plainItems = buildSqlCompletionItems(plainSql, plainSql.length, {
+      tables: [{ name: "orders", schema: "public", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType,
+      dialect: "mysql",
+    });
+    assert.equal(plainItems.find((item) => item.type === "table" && item.label === "orders")?.apply, "orders", databaseType);
+  }
 });
 
 test("suggests matching table names after FROM", () => {

@@ -44,8 +44,10 @@ pub struct ListTablesRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
     #[schemars(description = "Database name")]
+    #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
     #[schemars(description = "Schema name")]
+    #[schemars(extend("type" = "string"))]
     pub schema: Option<String>,
 }
 
@@ -56,8 +58,10 @@ pub struct DescribeTableRequest {
     #[schemars(description = "Table name")]
     pub table: String,
     #[schemars(description = "Database name")]
+    #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
     #[schemars(description = "Schema name")]
+    #[schemars(extend("type" = "string"))]
     pub schema: Option<String>,
 }
 
@@ -66,20 +70,24 @@ pub struct ExecuteQueryRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
     #[schemars(description = "Database name")]
+    #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
     #[schemars(description = "SQL query to execute")]
     pub sql: String,
     #[schemars(
         description = "Session ID from dbx_open_session. When set, the query runs on the session's pinned connection, preserving USE/SET and other session state across calls."
     )]
+    #[schemars(extend("type" = "string"))]
     pub session_id: Option<String>,
     #[schemars(
         description = "Start character offset for every string cell (default 0, max 1000000). Use the next offset reported by a truncated result to slide through a long value; narrow the query to the target row and column first."
     )]
+    #[schemars(extend("type" = "integer"))]
     pub cell_char_offset: Option<u64>,
     #[schemars(
         description = "Maximum characters returned per string cell (default 200, max 4000). Increase only for an explicit long-value expansion."
     )]
+    #[schemars(extend("type" = "integer"))]
     pub cell_char_limit: Option<u64>,
 }
 
@@ -88,6 +96,7 @@ pub struct OpenSessionRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
     #[schemars(description = "Database name")]
+    #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
 }
 
@@ -102,14 +111,17 @@ pub struct AddConnectionRequest {
     pub name: String,
     pub db_type: String,
     pub host: String,
+    #[schemars(extend("type" = "integer"))]
     pub port: Option<u16>,
     #[serde(default)]
     pub username: String,
     #[serde(default)]
     pub password: String,
+    #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
     #[serde(default)]
     pub ssl: bool,
+    #[schemars(extend("type" = "string"))]
     pub driver_profile: Option<String>,
 }
 
@@ -124,6 +136,7 @@ pub struct DuplicateConnectionRequest {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RemoveConnectionRequest {
     pub connection_name: String,
+    #[schemars(extend("type" = "string"))]
     pub connection_id: Option<String>,
 }
 
@@ -132,6 +145,7 @@ pub struct ExecuteRedisCommandRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
     #[schemars(description = "Redis logical database number")]
+    #[schemars(extend("type" = "integer"))]
     pub db: Option<u32>,
     #[schemars(description = "Redis command to execute, for example GET mykey or INFO")]
     pub command: String,
@@ -141,12 +155,15 @@ pub struct ExecuteRedisCommandRequest {
 pub struct SchemaContextRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
+    #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
+    #[schemars(extend("type" = "string"))]
     pub schema: Option<String>,
     #[schemars(description = "Specific table names to include")]
     #[schemars(extend("type" = "array"))]
     pub tables: Option<Vec<String>>,
     #[schemars(description = "Maximum number of tables to include, from 1 to 20")]
+    #[schemars(extend("type" = "integer"))]
     pub max_tables: Option<usize>,
 }
 
@@ -155,7 +172,9 @@ pub struct OpenTableRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
     pub table: String,
+    #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
+    #[schemars(extend("type" = "string"))]
     pub schema: Option<String>,
 }
 
@@ -164,6 +183,7 @@ pub struct ExecuteAndShowRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
     pub sql: String,
+    #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
 }
 
@@ -1096,7 +1116,11 @@ fn validate_sql_policy(
     if risk == SqlRisk::Transaction {
         return Err(tool_error("SQL_BLOCKED", "Transaction statements are not supported by MCP."));
     }
-    let is_write = is_write_sql_for_database(sql, connection.db_type);
+    // The keyword scan alone misses write-capable SQL that the risk classifier
+    // does recognize (locking reads, side-effect functions, writable CTEs), and
+    // those statements would otherwise reach the database whenever high-risk SQL
+    // is permitted. Fail closed on either signal so read-only stays read-only.
+    let is_write = risk != SqlRisk::ReadOnly || is_write_sql_for_database(sql, connection.db_type);
     if policy.read_only && is_write {
         return Err(tool_error("MCP_READ_ONLY", "DBX global MCP read-only mode is enabled. SQL write blocked."));
     }
@@ -1528,6 +1552,60 @@ mod tests {
             for field in ["connection_id", "connection_name"] {
                 let selector = properties.get(field).expect("selector field should be published");
                 assert_eq!(selector.get("type"), Some(&serde_json::json!("string")), "{tool_name}.{field}");
+                assert!(!required.iter().any(|required| *required == field), "{tool_name}.{field} must stay optional");
+            }
+        }
+    }
+
+    #[test]
+    fn optional_fields_never_publish_nullable_union_types() {
+        // Some MCP clients (e.g. OpenCode, see #6344) cannot resolve a JSON Schema
+        // `"type": ["string", "null"]` union and fall back to wrapping the argument in a
+        // nested error object instead of passing the value through. b521d0377 fixed this for
+        // `ConnectionSelector`'s connection_id/connection_name but left every other optional
+        // field on these request structs emitting the same union shape. Every optional field
+        // must instead publish a single concrete `type`, relying on omission from `required`
+        // (not a `"null"` union member) to signal optionality.
+        let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
+        let tools = server.tool_router.list_all();
+
+        let checks: &[(&str, &[&str])] = &[
+            ("dbx_list_tables", &["database", "schema"]),
+            ("dbx_describe_table", &["database", "schema"]),
+            ("dbx_execute_query", &["database", "session_id", "cell_char_offset", "cell_char_limit"]),
+            ("dbx_open_session", &["database"]),
+            ("dbx_open_table", &["database", "schema"]),
+            ("dbx_execute_and_show", &["database"]),
+            ("dbx_add_connection", &["port", "database", "driver_profile"]),
+            ("dbx_remove_connection", &["connection_id"]),
+            ("dbx_execute_redis_command", &["db"]),
+            ("dbx_get_schema_context", &["database", "schema", "max_tables"]),
+        ];
+
+        for (tool_name, fields) in checks {
+            let tool = tools.iter().find(|tool| tool.name == *tool_name).expect("tool should be registered");
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("tool should publish object properties");
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+
+            for field in *fields {
+                let schema =
+                    properties.get(*field).unwrap_or_else(|| panic!("{tool_name}.{field} should be published"));
+                let type_value =
+                    schema.get("type").unwrap_or_else(|| panic!("{tool_name}.{field} should publish a type"));
+                assert!(
+                    type_value.is_string(),
+                    "{tool_name}.{field} must publish a single concrete type, not a union: {type_value:?}"
+                );
                 assert!(!required.iter().any(|required| *required == field), "{tool_name}.{field} must stay optional");
             }
         }

@@ -12,6 +12,11 @@ function installLocalStorage() {
   });
 }
 
+// Mirrors SIDEBAR_TABLE_SEARCH_RESULT_BUDGET in connectionStore.ts (4× the
+// default sidebar_table_page_size of 500). Kept as a local constant because
+// connectionStore must stay dynamically imported for vi.doMock isolation.
+const SIDEBAR_SEARCH_RESULT_BUDGET = 2000;
+
 function postgresConnection(): ConnectionConfig {
   return {
     id: "pg-1",
@@ -518,8 +523,16 @@ describe("connectionStore metadata loading", () => {
     store.treeNodes = [node];
 
     const normalLoad = store.loadDatabases(connection.id);
-    const searchLoad = store.loadConnectedConnectionRootForSidebarSearch(connection.id);
     await listStarted;
+    const searchLoad = store.loadConnectedConnectionRootForSidebarSearch(connection.id);
+    let searchLoadSettled = false;
+    void searchLoad.finally(() => {
+      searchLoadSettled = true;
+    });
+    await Promise.resolve();
+
+    expect(searchLoadSettled).toBe(false);
+
     resolveDatabases([{ name: "dajia", comment: null }]);
     await Promise.all([normalLoad, searchLoad]);
 
@@ -3157,7 +3170,7 @@ describe("connectionStore metadata loading", () => {
     expect(tablesGroup.objectCount).toBe(5);
     expect(tablesGroup.isLoading).toBe(false);
     expect(listTables.mock.calls.map((call) => [call[3], call[4], call[5]])).toEqual([
-      ["0003", 2, undefined],
+      ["0003", SIDEBAR_SEARCH_RESULT_BUDGET, undefined],
       [undefined, 3, 0],
       [undefined, 3, 0],
       [undefined, 3, 2],
@@ -3211,7 +3224,7 @@ describe("connectionStore metadata loading", () => {
     store.sidebarSearchQuery = "orders";
     await store.loadObjectGroupChildren(tablesGroup, { force: true });
 
-    expect(listTables).toHaveBeenLastCalledWith(connection.id, "basic", "basic", "orders", 200, undefined, ["TABLE"]);
+    expect(listTables).toHaveBeenLastCalledWith(connection.id, "basic", "basic", "orders", SIDEBAR_SEARCH_RESULT_BUDGET, undefined, ["TABLE"]);
     expect(tablesGroup.children?.map((node) => node.label)).toEqual(["orders"]);
 
     let resolveAncestorLoad!: (tables: TableInfo[]) => void;
