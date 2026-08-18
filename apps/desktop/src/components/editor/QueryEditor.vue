@@ -23,6 +23,7 @@ import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { joinQueryEditorLines } from "@/lib/editor/queryEditorJoinLines";
+import { insertQueryEditorNewline } from "@/lib/editor/queryEditorNewline";
 import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
@@ -1940,7 +1941,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
 function insertNewlineWithoutCompletion(view: EditorViewType): boolean {
   codeMirrorCloseCompletion?.(view);
   suppressNextSqlCompletionAutoStartUntil = Date.now() + 750;
-  const handled = codeMirrorInsertNewlineKeepIndent?.(view) ?? false;
+  const handled = insertQueryEditorNewline(view, codeMirrorInsertNewlineKeepIndent, props.databaseType);
   if (!handled) suppressNextSqlCompletionAutoStartUntil = 0;
   return handled;
 }
@@ -3383,7 +3384,7 @@ async function provideMongoCompletions(currentState: import("@codemirror/state")
   return {
     from: completionContext.from,
     options: items.map((item) => completionOptionForItem(item)),
-    validFor: getMongoCompletionResultValidFor(),
+    validFor: getMongoCompletionResultValidFor(completionContext),
   };
 }
 

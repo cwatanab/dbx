@@ -6273,6 +6273,63 @@ pub async fn list_partitions_core(
     .await
 }
 
+/// PostgreSQL partition classification of a single table, used by the table
+/// structure editor to decide whether `CREATE INDEX CONCURRENTLY` applies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePartitionStatus {
+    /// The table is a partitioned parent (`pg_class.relkind = 'p'`); PostgreSQL
+    /// rejects `CREATE INDEX CONCURRENTLY` directly on it — the supported
+    /// approach is building child indexes concurrently and attaching them.
+    pub is_partitioned_parent: bool,
+    /// The table is itself a partition of a parent (`pg_class.relispartition`).
+    pub is_partition: bool,
+}
+
+pub async fn table_partition_status_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<TablePartitionStatus, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::Postgres(pool)) => {
+                let info = db::postgres::get_table_partition_info(pool, schema, table).await?;
+                Ok(TablePartitionStatus {
+                    is_partitioned_parent: info.key.is_some() && !info.is_partition,
+                    is_partition: info.is_partition,
+                })
+            }
+            _ => Ok(TablePartitionStatus::default()),
+        }
+    })
+    .await
+}
+
+/// Same-table index names whose `pg_index.indisvalid` is `false` (left behind
+/// by a cancelled `CREATE INDEX CONCURRENTLY`). Empty for non-PostgreSQL pools.
+pub async fn list_invalid_indexes_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, String> {
+    retry_metadata_connection(state, connection_id, Some(database), || async {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        let connections = state.connections.read().await;
+        match connections.get(&pool_key) {
+            Some(PoolKind::Postgres(pool)) => db::postgres::list_invalid_indexes(pool, schema, table).await,
+            _ => Ok(vec![]),
+        }
+    })
+    .await
+}
+
 pub async fn list_subpartitions_core(
     state: &AppState,
     connection_id: &str,
@@ -6446,7 +6503,18 @@ pub async fn get_table_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false).await
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, false).await
+}
+
+pub async fn get_table_export_ddl_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+) -> Result<String, String> {
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, false, true).await
 }
 
 pub async fn get_table_display_ddl_core(
@@ -6457,7 +6525,7 @@ pub async fn get_table_display_ddl_core(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
 ) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true).await
+    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, true, false).await
 }
 
 async fn get_table_ddl_core_with_options(
@@ -6468,6 +6536,7 @@ async fn get_table_ddl_core_with_options(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
     include_postgres_access: bool,
+    portable_oracle: bool,
 ) -> Result<String, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
@@ -6513,7 +6582,7 @@ async fn get_table_ddl_core_with_options(
     }
 
     retry_metadata_connection(state, connection_id, Some(database), || {
-        get_table_ddl_once(state, connection_id, database, schema, table, include_postgres_access)
+        get_table_ddl_once(state, connection_id, database, schema, table, include_postgres_access, portable_oracle)
     })
     .await
 }
@@ -6525,6 +6594,7 @@ async fn get_table_ddl_once(
     schema: &str,
     table: &str,
     include_postgres_access: bool,
+    portable_oracle: bool,
 ) -> Result<String, String> {
     let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
@@ -6604,6 +6674,7 @@ async fn get_table_ddl_once(
                     database,
                     schema,
                     table,
+                    portable_oracle,
                     agent_metadata_timeout(db_config.as_ref()),
                 )
                 .await;
@@ -7712,10 +7783,11 @@ async fn oracle_agent_table_ddl(
     database: &str,
     schema: &str,
     table: &str,
+    portable: bool,
     timeout_duration: Option<Duration>,
 ) -> Result<String, String> {
     let mut client = client.lock().await;
-    let ddl = client.get_table_ddl::<String>(database, schema, table, timeout_duration).await?;
+    let ddl = client.get_table_ddl_with_options::<String>(database, schema, table, portable, timeout_duration).await?;
     match append_oracle_table_comment_ddl(&mut client, database, schema, table, &ddl, timeout_duration).await {
         Ok(ddl) => Ok(ddl),
         Err(error) => {
@@ -8513,6 +8585,49 @@ mod ddl_tests {
         let ddl = render_postgres_table_ddl("public", "users", &[id], &[], &[], None);
 
         assert!(ddl.contains("\"id\" integer generated by default as identity NOT NULL"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_table_ddl_renders_owned_serial_markers_without_external_defaults() {
+        for (column_name, data_type, serial_type) in [
+            ("small\"id", "smallint", "smallserial"),
+            ("regular\"id", "integer", "serial"),
+            ("large\"id", "bigint", "bigserial"),
+        ] {
+            let mut id = column(column_name, data_type);
+            id.is_nullable = false;
+            let sequence_name = format!("{column_name}_seq").replace('"', "\"\"");
+            id.column_default = Some(format!("nextval('\"tenant\"\"schema\".\"{sequence_name}\"'::regclass)"));
+            id.extra = Some(serial_type.to_string());
+
+            let ddl = render_postgres_table_ddl("tenant\"schema", "order\"items", &[id], &[], &[], None);
+
+            assert!(ddl.contains(&format!("{} {serial_type} NOT NULL", pg_ident(column_name))), "ddl: {ddl}");
+            assert!(!ddl.contains("nextval("), "ddl: {ddl}");
+            assert!(ddl.starts_with("CREATE TABLE \"tenant\"\"schema\".\"order\"\"items\""), "ddl: {ddl}");
+        }
+    }
+
+    #[test]
+    fn postgres_table_ddl_preserves_unmarked_nextval_defaults() {
+        let mut id = column("id", "bigint");
+        id.column_default = Some("nextval('shared.custom_id_source'::regclass)".to_string());
+
+        let ddl = render_postgres_table_ddl("public", "orders", &[id], &[], &[], None);
+
+        assert!(ddl.contains("\"id\" bigint DEFAULT nextval('shared.custom_id_source'::regclass)"), "ddl: {ddl}");
+    }
+
+    #[test]
+    fn postgres_table_ddl_keeps_generated_columns_distinct_from_serial_markers() {
+        let mut generated = column("total", "numeric");
+        generated.column_default = Some("should_not_be_rendered".to_string());
+        generated.extra = Some("generated always as (price * quantity) stored".to_string());
+
+        let ddl = render_postgres_table_ddl("public", "orders", &[generated], &[], &[], None);
+
+        assert!(ddl.contains("\"total\" numeric generated always as (price * quantity) stored"), "ddl: {ddl}");
+        assert!(!ddl.contains("should_not_be_rendered"), "ddl: {ddl}");
     }
 
     #[test]
@@ -9559,7 +9674,13 @@ fn render_postgres_table_ddl_with_partition_info(
         columns
             .iter()
             .map(|c| {
-                let mut line = format!("  {} {}", pg_ident(&c.name), c.data_type);
+                let serial_type = match c.extra.as_deref().map(str::trim) {
+                    Some("smallserial") => Some("smallserial"),
+                    Some("serial") => Some("serial"),
+                    Some("bigserial") => Some("bigserial"),
+                    _ => None,
+                };
+                let mut line = format!("  {} {}", pg_ident(&c.name), serial_type.unwrap_or(&c.data_type));
                 let generated_clause = c
                     .extra
                     .as_deref()
@@ -9571,7 +9692,7 @@ fn render_postgres_table_ddl_with_partition_info(
                 if !c.is_nullable {
                     line.push_str(" NOT NULL");
                 }
-                if generated_clause.is_none() {
+                if generated_clause.is_none() && serial_type.is_none() {
                     if let Some(ref def) = c.column_default {
                         line.push_str(&format!(" DEFAULT {def}"));
                     }

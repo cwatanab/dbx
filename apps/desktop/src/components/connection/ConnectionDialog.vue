@@ -33,7 +33,7 @@ import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
 import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseServiceConnectionUrl, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
@@ -75,6 +75,7 @@ import {
   ArrowLeft,
   ArrowDown,
   ArrowUp,
+  Check,
   CheckSquare,
   ChevronRight,
   CircleHelp,
@@ -121,13 +122,16 @@ import {
 import {
   GAUSSDB_M_JDBC_DRIVER_CLASS,
   gaussdbConnectionMode,
+  gaussdbCountQueryDop,
   gaussdbIdentifierQuoteStyle,
   gaussdbTargetServerType,
   setGaussdbConnectionMode,
+  setGaussdbCountQueryDop,
   setGaussdbIdentifierQuoteStyle,
   setGaussdbTargetServerType,
   supportsGaussdbIdentifierQuoteStyle,
   type GaussdbConnectionMode,
+  type GaussdbCountQueryDop,
   type GaussdbIdentifierQuoteStyle,
   type GaussdbTargetServerType,
 } from "@/lib/database/jdbcDialect";
@@ -258,6 +262,8 @@ const agentInstallError = ref("");
 const showConnectionErrorDialog = ref(false);
 const connectionErrorRawDetail = ref("");
 const connectionErrorDetail = ref("");
+const testResultCopied = ref(false);
+const connectionErrorCopied = ref(false);
 const editingId = ref<string | null>(null);
 const draftTestConnectionId = ref(uuid());
 const showVisibleDatabasesDialog = ref(false);
@@ -354,7 +360,6 @@ const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, num
   direct: 9200,
   kibana: 5601,
 });
-
 function resetElasticsearchProxyFields(externalConfig?: unknown) {
   const mode = elasticsearchConnectionModeFromConfig(externalConfig);
   elasticsearchConnectionMode.value = mode;
@@ -552,6 +557,14 @@ const gaussdbTargetServerTypeComputed = computed<GaussdbTargetServerType>({
   },
 });
 
+const gaussdbCountQueryDopComputed = computed<GaussdbCountQueryDop>({
+  get: () => gaussdbCountQueryDop(form.value),
+  set: (value) => {
+    setGaussdbCountQueryDop(form.value, value);
+    resetTestState();
+  },
+});
+
 const gaussdbHostEntries = ref<GaussdbHostEntry[]>(parseGaussdbHosts(form.value.host, form.value.port));
 
 watch(
@@ -603,6 +616,31 @@ function externalConfigRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
 }
 
+function meilisearchConnectionUrl(config: Pick<ConnectionConfig, "host" | "port" | "ssl" | "url_params" | "external_config">): string {
+  const host = config.host.trim();
+  if (!host) return "";
+
+  const scheme = config.ssl ? "https" : "http";
+  const endpointHost = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  const externalConfig = externalConfigRecord(config.external_config);
+  const storedBasePath = externalConfig.basePath ?? externalConfig.base_path;
+  const basePathSegments = typeof storedBasePath === "string" ? storedBasePath.trim().split("/").filter(Boolean) : [];
+  const basePath = basePathSegments.length ? `/${basePathSegments.join("/")}` : "";
+  const urlParams = config.url_params?.trim().replace(/^\?/, "") || "";
+
+  return `${scheme}://${endpointHost}:${config.port}${basePath}${urlParams ? `?${urlParams}` : ""}`;
+}
+
+function syncMeilisearchHostInput(config: Pick<ConnectionConfig, "host" | "port" | "ssl" | "url_params" | "external_config">) {
+  meilisearchHostInput.value = meilisearchConnectionUrl(config);
+  appliedMeilisearchHostInput.value = meilisearchHostInput.value;
+}
+
+function resetMeilisearchHostInput() {
+  meilisearchHostInput.value = "";
+  appliedMeilisearchHostInput.value = "";
+}
+
 function sqlServerPortExplicitFromConfig(config: Pick<ConnectionConfig, "db_type" | "external_config">): boolean {
   if (config.db_type !== "sqlserver") return false;
   const external = externalConfigRecord(config.external_config);
@@ -651,6 +689,8 @@ const selectedJdbcDriverPath = ref("");
 const jdbcManualClasspathOpen = ref(false);
 const connectionUrlInput = ref("");
 const appliedConnectionUrlInput = ref("");
+const meilisearchHostInput = ref("");
+const appliedMeilisearchHostInput = ref("");
 const oracleTnsAdminPath = ref("");
 const oceanbaseSubMode = ref<"mysql" | "oracle">("mysql");
 const h2ConnectionMode = ref<H2ConnectionMode>("file");
@@ -1049,6 +1089,14 @@ const driverProfiles: Record<
   access: { type: "access", port: 0, user: "", label: "Microsoft Access", icon: "access" },
   mongodb: { type: "mongodb", port: 27017, user: "", label: "MongoDB", icon: "mongodb" },
   "mongodb-legacy": { type: "mongodb", port: 27017, user: "", label: "MongoDB (Legacy)", icon: "mongodb" },
+  dynamodb: {
+    type: "dynamodb",
+    port: 443,
+    user: "",
+    label: "Amazon DynamoDB",
+    icon: "dynamodb",
+    host: "dynamodb.us-east-1.amazonaws.com",
+  },
   clickhouse: {
     type: "clickhouse",
     port: 8123,
@@ -1870,6 +1918,7 @@ function failAgentDriverInstall(error: unknown) {
 function showConnectionError(message: string) {
   connectionErrorRawDetail.value = message;
   connectionErrorDetail.value = translateBackendError(t, message);
+  connectionErrorCopied.value = false;
   showConnectionErrorDialog.value = true;
 }
 
@@ -2313,13 +2362,13 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   form.value.db_type = profile.type;
   form.value.driver_profile = val;
   form.value.driver_label = isCustomCompatibleProfile() ? customDriverName.value.trim() || profile.label : profile.label;
-  if (profile.type !== "sqlserver") {
+  const preserveMeilisearchConfig = preserveConnectionFields && previousDatabaseType === "meilisearch" && profile.type === "meilisearch";
+  if (profile.type !== "sqlserver" && !preserveMeilisearchConfig) {
     form.value.external_config = undefined;
   }
   if (profile.type !== "elasticsearch" || previousDatabaseType !== "elasticsearch") {
     resetElasticsearchProxyFields();
   }
-
   if (!preserveConnectionFields) {
     oracleTnsAdminPath.value = "";
     form.value.port = profile.port;
@@ -2336,6 +2385,11 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     }
     if (profile.type === "sqlite") {
       form.value.database = undefined;
+    }
+    if (profile.type === "dynamodb") {
+      form.value.database = "us-east-1";
+      form.value.connection_string = undefined;
+      form.value.ssl = true;
     }
     if (profile.type === "h2") {
       h2ConnectionMode.value = "file";
@@ -2426,6 +2480,11 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.url_params = "";
     }
     resetHiveKerberosFields(profile.type === "hive" || profile.type === "kyuubi" || profile.type === "impala" ? form.value : undefined);
+  }
+  if (profile.type === "meilisearch") {
+    syncMeilisearchHostInput(form.value);
+  } else {
+    resetMeilisearchHostInput();
   }
 }
 
@@ -2520,6 +2579,11 @@ watch(
       productionProtectionEnabled.value = !!config.is_production || (config.production_databases?.length ?? 0) > 0;
       connectionUrlInput.value = config.db_type === "h2" && config.connection_string ? config.connection_string : "";
       appliedConnectionUrlInput.value = connectionUrlInput.value.trim();
+      if (config.db_type === "meilisearch") {
+        syncMeilisearchHostInput(config);
+      } else {
+        resetMeilisearchHostInput();
+      }
       if (config.db_type === "mq") {
         hydrateMqFields(config.external_config);
       } else {
@@ -2745,6 +2809,7 @@ const iconTypeMap: Record<string, string> = {
   access: "access",
   redis: "redis",
   mongodb: "mongodb",
+  dynamodb: "dynamodb",
   duckdb: "duckdb",
   clickhouse: "clickhouse",
   sqlserver: "sqlserver",
@@ -2835,6 +2900,7 @@ const dbOptions: DbOption[] = [
   { value: "opentenbase", label: "OpenTenBase" },
   { value: "mysql", label: "MySQL" },
   { value: "mongodb", label: "MongoDB" },
+  { value: "dynamodb", label: "Amazon DynamoDB" },
   { value: "redis", label: "Redis" },
   { value: "oracle", label: "Oracle" },
   { value: "sqlite", label: "SQLite" },
@@ -2951,7 +3017,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "document",
     titleKey: "connection.databaseCategoryDocument",
-    optionValues: ["mongodb", "redis", "elasticsearch", "easysearch", "meilisearch", "hbase", "manticoresearch", "cassandra"],
+    optionValues: ["mongodb", "dynamodb", "redis", "elasticsearch", "easysearch", "meilisearch", "hbase", "manticoresearch", "cassandra"],
   },
   {
     key: "graph_ai",
@@ -3532,6 +3598,7 @@ async function testConnection() {
   const runId = ++testRunId;
   isTesting.value = true;
   testResult.value = null;
+  testResultCopied.value = false;
   let config: ConnectionConfig | null = null;
   const submittedSourceName = form.value.name;
   try {
@@ -3577,6 +3644,11 @@ function applyConnectionUrlToForm(input: string): boolean {
     const draft = parseConnectionDeepLink(input) ?? parseServiceConnectionUrl(input);
     if (draft) {
       applyConnectionDraftToForm({ ...draft, oneTime: undefined });
+      if (form.value.db_type === "meilisearch") {
+        syncMeilisearchHostInput(form.value);
+      } else {
+        resetMeilisearchHostInput();
+      }
       resetTestState();
       appliedConnectionUrlInput.value = input.trim();
       return true;
@@ -3586,6 +3658,11 @@ function applyConnectionUrlToForm(input: string): boolean {
     form.value = applyParsedConnectionUrl(form.value, parsed);
     if (form.value.db_type === "victoriametrics") {
       hydrateVictoriaMetricsFields(form.value.external_config);
+    }
+    if (form.value.db_type === "meilisearch") {
+      syncMeilisearchHostInput(form.value);
+    } else {
+      resetMeilisearchHostInput();
     }
     oracleTnsAdminPath.value = parseOracleTnsConnectionString(parsed.connectionString)?.tnsAdmin || "";
     selectedType.value = parsed.driverProfile;
@@ -3611,21 +3688,46 @@ function hasPendingConnectionUrlInput(): boolean {
   return !!url && url !== appliedConnectionUrlInput.value;
 }
 
+function hasPendingMeilisearchHostInput(): boolean {
+  const url = meilisearchHostInput.value.trim();
+  return url !== appliedMeilisearchHostInput.value;
+}
+
+function applyMeilisearchHostInput(): boolean {
+  try {
+    const input = meilisearchHostInput.value.trim();
+    form.value = applyParsedConnectionUrl(form.value, parseConnectionUrl(input, "meilisearch"));
+    appliedMeilisearchHostInput.value = input;
+    resetTestState();
+    return true;
+  } catch (e: any) {
+    toast(t("connection.parseConnectionUrlFailed", { message: e?.message || String(e) }), 5000);
+    return false;
+  }
+}
+
 function ensureConnectionHostResolvedFromUrl(): boolean {
-  if (!hasPendingConnectionUrlInput()) return true;
-  return applyConnectionUrlToForm(connectionUrlInput.value.trim());
+  if (hasPendingConnectionUrlInput() && !applyConnectionUrlToForm(connectionUrlInput.value.trim())) return false;
+  if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) return applyMeilisearchHostInput();
+  return true;
 }
 
 function formValueForSubmit(): Omit<ConnectionConfig, "id"> {
   const url = connectionUrlInput.value.trim();
-  if (!url || url === appliedConnectionUrlInput.value) return form.value;
+  if (url && url !== appliedConnectionUrlInput.value) {
+    const draft = parseConnectionDeepLink(url);
+    if (draft) {
+      return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
+    }
 
-  const draft = parseConnectionDeepLink(url);
-  if (draft) {
-    return applyConnectionDraftToConfig(form.value, { ...draft, oneTime: undefined });
+    return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, selectedType.value));
   }
 
-  return applyParsedConnectionUrl(form.value, parseConnectionUrl(url, selectedType.value));
+  if (form.value.db_type === "meilisearch" && hasPendingMeilisearchHostInput()) {
+    return applyParsedConnectionUrl(form.value, parseConnectionUrl(meilisearchHostInput.value.trim(), "meilisearch"));
+  }
+
+  return form.value;
 }
 
 function applyDremioJdbcMetadata(config: LegacyConnectionConfig) {
@@ -3726,6 +3828,15 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.database = config.database?.trim() || undefined;
     if (!config.database) {
       throw new Error(t("connection.kingbaseDatabaseRequired"));
+    }
+  }
+  if (config.db_type === "dynamodb") {
+    config.database = config.database?.trim() || "us-east-1";
+    config.username = config.username.trim();
+    config.password = config.password.trim();
+    config.connection_string = config.connection_string?.trim() || undefined;
+    if (!config.username || !config.password) {
+      throw new Error(t("connection.dynamodbCredentialsRequired"));
     }
   }
   if (config.db_type === "gaussdb") {
@@ -3902,7 +4013,6 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.username = "";
     config.password = config.password.trim();
     config.database = undefined;
-    config.external_config = undefined;
   } else if (config.db_type === "sqlserver") {
     config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
@@ -4316,6 +4426,8 @@ function resetTestState() {
   showConnectionErrorDialog.value = false;
   connectionErrorRawDetail.value = "";
   connectionErrorDetail.value = "";
+  testResultCopied.value = false;
+  connectionErrorCopied.value = false;
 }
 
 function resetVisibleDatabaseDraftState() {
@@ -4688,6 +4800,7 @@ async function copyTestResult() {
   if (!testResultMessage.value) return;
   try {
     await copyToClipboard(testResultMessage.value);
+    testResultCopied.value = true;
     toast(t("grid.copied"));
   } catch (e: any) {
     toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
@@ -4719,6 +4832,7 @@ async function copyConnectionErrorDetail() {
   if (!connectionErrorDetail.value) return;
   try {
     await copyToClipboard(connectionErrorDetail.value);
+    connectionErrorCopied.value = true;
     toast(t("grid.copied"));
   } catch (e: any) {
     toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
@@ -4754,6 +4868,7 @@ function resetForm() {
   selectedJdbcDriverPath.value = "";
   connectionUrlInput.value = "";
   appliedConnectionUrlInput.value = "";
+  resetMeilisearchHostInput();
   oracleTnsAdminPath.value = "";
   dialogStep.value = "select";
   dbSearchQuery.value = "";
@@ -4810,6 +4925,7 @@ function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draf
     database: draft.database ?? config.database,
     url_params: draft.urlParams ?? config.url_params,
     ssl: draft.ssl ?? config.ssl,
+    external_config: draft.dbType === "meilisearch" && draft.basePath !== undefined ? applyMeilisearchBasePathToExternalConfig(config.external_config, draft.basePath) : config.external_config,
     connection_string: draft.connectionString ?? config.connection_string,
     oracle_connection_type: draft.oracleConnectionType ?? config.oracle_connection_type,
     one_time: draft.oneTime || undefined,
@@ -6587,6 +6703,38 @@ function openExternalUrl(url: string) {
                   </div>
                 </template>
 
+                <!-- DynamoDB: endpoint, region, AWS credentials -->
+                <template v-else-if="form.db_type === 'dynamodb'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.dynamodbEndpoint") }}</Label>
+                    <Input v-model="form.host" class="col-span-2" placeholder="dynamodb.us-east-1.amazonaws.com" />
+                    <Input v-model.number="form.port" type="number" class="col-span-1" min="1" max="65535" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <span />
+                    <label class="col-span-3 flex items-center gap-2 text-sm">
+                      <input v-model="form.ssl" type="checkbox" />
+                      <span>{{ t("connection.sslEnable") }}</span>
+                    </label>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.dynamodbRegion") }}</Label>
+                    <Input v-model="form.database" class="col-span-3" placeholder="us-east-1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.dynamodbAccessKeyId") }}</Label>
+                    <Input v-model="form.username" class="col-span-3" autocomplete="username" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.dynamodbSecretAccessKey") }}</Label>
+                    <PasswordInput v-model="form.password" class="col-span-3" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.dynamodbSessionToken") }}</Label>
+                    <PasswordInput v-model="form.connection_string" class="col-span-3" :placeholder="t('connection.dynamodbSessionTokenPlaceholder')" />
+                  </div>
+                </template>
+
                 <!-- MongoDB: URL or form -->
                 <template v-else-if="form.db_type === 'mongodb'">
                   <div class="grid grid-cols-4 items-center gap-4">
@@ -6989,6 +7137,10 @@ function openExternalUrl(url: string) {
                       </div>
                     </div>
                   </template>
+                  <div v-else-if="form.db_type === 'meilisearch'" class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
+                    <Input v-model="meilisearchHostInput" class="col-span-3" :placeholder="connectionUrlPlaceholder" @input="resetTestState" />
+                  </div>
                   <div v-else-if="form.db_type !== 'oracle' || form.oracle_connection_type !== 'tns'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ form.db_type === "elasticsearch" && elasticsearchConnectionMode === "kibana" ? t("connection.elasticsearchKibanaHost") : t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
@@ -7878,6 +8030,26 @@ function openExternalUrl(url: string) {
                     </p>
                   </div>
                 </div>
+                <div v-if="showGaussdbConnectionMode" class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelSmallPaddedClass">{{ t("connection.gaussdbCountQueryDop") }}</Label>
+                  <div class="col-span-3 grid gap-1">
+                    <Select v-model="gaussdbCountQueryDopComputed">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem :value="1">1 ({{ t("common.disabled") }})</SelectItem>
+                        <SelectItem :value="2">2</SelectItem>
+                        <SelectItem :value="4">4</SelectItem>
+                        <SelectItem :value="8">8</SelectItem>
+                        <SelectItem :value="16">16</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs leading-5 text-muted-foreground">
+                      {{ t("connection.gaussdbCountQueryDopHint") }}
+                    </p>
+                  </div>
+                </div>
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
                   <div class="col-span-3 grid grid-cols-2 gap-2">
@@ -8301,8 +8473,9 @@ function openExternalUrl(url: string) {
               <span class="block min-w-0 flex-1 basis-0 truncate text-xs" :class="testResult.ok ? 'text-green-600' : 'text-red-600'" :title="testResultMessage" role="status" aria-live="polite">
                 {{ testResultMessage }}
               </span>
-              <Button v-if="!testResult.ok" variant="ghost" size="icon-xs" class="h-5 w-5 shrink-0" :title="t('connection.copyTestResult')" :aria-label="t('connection.copyTestResult')" @click="copyTestResult">
-                <Copy class="h-3 w-3" />
+              <Button v-if="!testResult.ok" variant="ghost" size="icon-xs" class="h-5 w-5 shrink-0" :title="testResultCopied ? t('grid.copied') : t('connection.copyTestResult')" :aria-label="testResultCopied ? t('grid.copied') : t('connection.copyTestResult')" @click="copyTestResult">
+                <Check v-if="testResultCopied" class="h-3 w-3" />
+                <Copy v-else class="h-3 w-3" />
               </Button>
             </template>
           </div>
@@ -8387,8 +8560,9 @@ function openExternalUrl(url: string) {
           {{ t("toolbar.driverManager") }}
         </Button>
         <Button variant="outline" @click="copyConnectionErrorDetail">
-          <Copy class="mr-1.5 h-3.5 w-3.5" />
-          {{ t("connection.copyError") }}
+          <Check v-if="connectionErrorCopied" class="mr-1.5 h-3.5 w-3.5" />
+          <Copy v-else class="mr-1.5 h-3.5 w-3.5" />
+          {{ connectionErrorCopied ? t("grid.copied") : t("connection.copyError") }}
         </Button>
         <Button @click="showConnectionErrorDialog = false">{{ t("common.close") }}</Button>
       </DialogFooter>

@@ -26,8 +26,13 @@ export function isQueryTimeoutErrorMessage(message: string, backendError?: Backe
   // Agent RPC client-side timeout (tokio::time::timeout in agent_driver.rs). This is the
   // fallback when JDBC setQueryTimeout never fires (unsupported/unresponsive driver), so the
   // backend already treats it as a query timeout (is_agent_rpc_timeout_error in query.rs) —
-  // surface the same action here to stay consistent with the backend.
-  if (/\bagent rpc call timed out\b/.test(lower)) return true;
+  // surface the same action here to stay consistent with the backend. Connection and other
+  // infrastructure stages must be excluded first because their messages can share this prefix.
+  const agentTimeout = /\bagent rpc call timed out(?: at ([a-z_]+))?\b/.exec(lower);
+  if (agentTimeout) {
+    const stage = agentTimeout[1];
+    return stage === undefined || QUERY_TIMEOUT_STAGES.has(stage);
+  }
   if (/\b(?:canceling|cancelling|canceled|cancelled)\b[\s\S]{0,80}\bstatement\b[\s\S]{0,80}\btimeout\b/.test(lower)) return true;
   if (/\b(?:connection|connect|pool|checkout|metadata|loading|health check|cancel request|ssh|tunnel)\b/.test(lower)) return false;
   return (

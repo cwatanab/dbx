@@ -1105,6 +1105,12 @@ async fn test_connection_with_info_inner(
                     Err(native_err)
                 }
             }
+            DatabaseType::DynamoDb => {
+                let client = db::dynamodb_driver::connect(&config, &host, port)?;
+                db::dynamodb_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::ClickHouse => {
                 let username = if config.username.is_empty() { None } else { Some(config.username.clone()) };
                 let password = if config.password.is_empty() { None } else { Some(config.password.clone()) };
@@ -1158,11 +1164,12 @@ async fn test_connection_with_info_inner(
                     .map(|_| "Connection successful".to_string())
             }
             DatabaseType::Meilisearch => {
-                let client = db::meilisearch_driver::MeilisearchClient::new(
+                let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
                     &url,
                     Some(&config.password),
                     config.ssl,
                     config.url_params.as_deref(),
+                    config.external_config.as_ref(),
                     connect_timeout,
                 )?;
                 db::meilisearch_driver::test_connection(&client, connect_timeout)
@@ -1517,6 +1524,11 @@ pub async fn connect_db(
                 }
             }
         }
+        DatabaseType::DynamoDb => {
+            let client = db::dynamodb_driver::connect(&db_config, &host, port)?;
+            db::dynamodb_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::DynamoDb(client)
+        }
         DatabaseType::ClickHouse => {
             let username = if db_config.username.is_empty() { None } else { Some(db_config.username.clone()) };
             let password = if db_config.password.is_empty() { None } else { Some(db_config.password.clone()) };
@@ -1560,11 +1572,12 @@ pub async fn connect_db(
             PoolKind::Easysearch(client)
         }
         DatabaseType::Meilisearch => {
-            let client = db::meilisearch_driver::MeilisearchClient::new(
+            let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
                 &url,
                 Some(&db_config.password),
                 db_config.ssl,
                 db_config.url_params.as_deref(),
+                db_config.external_config.as_ref(),
                 connect_timeout,
             )?;
             db::meilisearch_driver::test_connection(&client, connect_timeout).await?;

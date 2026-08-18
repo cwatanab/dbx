@@ -41,4 +41,20 @@ describe("QueryErrorActions", () => {
     expect(host.textContent).not.toContain("Change connection timeout");
     expect(host.textContent).toContain("Change query timeout");
   });
+
+  it("shows only connection timeout settings for connect-stage agent RPC timeouts", async () => {
+    const { host } = await mountActions("Agent RPC call timed out at connect");
+    const labels = Array.from(host.querySelectorAll("button"), (button) => button.textContent?.trim());
+
+    expect(labels).toContain("Change connection timeout");
+    expect(labels).not.toContain("Change query timeout");
+  });
+
+  it("does not offer query timeout settings for non-query Agent RPC stages", async () => {
+    for (const stage of ["request", "validate", "cancel", "close"]) {
+      const { host } = await mountActions(`Agent RPC call timed out at ${stage}`);
+
+      expect(host.textContent).not.toContain("Change query timeout");
+    }
+  });
 });

@@ -112,6 +112,7 @@ function createExportState(
   visibleColumnIndexes?: number[],
   isSyntheticContext = false,
   contextRowId?: number | null,
+  contextColumn?: number,
 ) {
   const rows = (rowDataList ?? [rowData ?? columns.map((column, index) => (column === "id" ? 1 : `value-${index}`))]).map((data, index) => ({ ...row(data), id: index + 1 }));
   const resolvedContextRowId = contextRowId === undefined ? (rows[0]?.id ?? null) : contextRowId;
@@ -137,7 +138,7 @@ function createExportState(
     selectedCells: computed(() => selectedCellMatrix ?? selectedCellsOverride ?? { columns: [], rows: [] }),
     selectedCellMatrix: computed(() => selectedCellMatrix ?? null),
     selectedRange: computed(() => null),
-    contextCell: ref(resolvedContextRowId === null ? null : { rowId: resolvedContextRowId, rowIndex: 0, col: isSyntheticContext ? 0 : -1 }),
+    contextCell: ref(resolvedContextRowId === null ? null : { rowId: resolvedContextRowId, rowIndex: 0, col: contextColumn ?? (isSyntheticContext ? 0 : -1) }),
     contextSelectionIsSynthetic: ref(isSyntheticContext),
     getRowItem: (rowId) => rows.find((candidate) => candidate.id === rowId),
     selectedRowIds,
@@ -288,6 +289,42 @@ describe("useDataGridExport prepared row statements", () => {
     );
   });
 
+  it("uses the right-clicked cell for SQL SELECT even when its row is selected", async () => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, [7, "Ada"], undefined, undefined, [1], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "SELECT * FROM users WHERE name = 'Ada';", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+
+    expect(state.canCopyWithExtractor("sql-select")).toBe(true);
+    await state.copyWithExtractor("sql-select");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-select",
+        columns: [expect.objectContaining({ sourceName: "name" })],
+        selectedColumnIndexes: [0],
+        rows: [["Ada"]],
+        selectionKind: "cells",
+      }),
+    );
+  });
+
+  it("uses only the right-clicked cell for a WHERE clause", async () => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, [7, "Ada"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, true, 1, 1);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "name = 'Ada'", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+
+    expect(state.canCopyWithExtractor("where-clause")).toBe(true);
+    await state.copyWithExtractor("where-clause");
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "where-clause",
+        columns: [expect.objectContaining({ sourceName: "name" })],
+        selectedColumnIndexes: [0],
+        rows: [["Ada"]],
+        selectionKind: "cells",
+      }),
+    );
+  });
+
   it("includes hidden identity support columns in a selected-row SELECT request", async () => {
     const item = row([7, "Ada"]);
     const options: UseDataGridExportOptions = {
@@ -403,6 +440,17 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     expect(state.canCopyWithExtractor("sql-select")).toBe(true);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "SELECT * FROM users WHERE id = 7;", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+
+    return state.copyWithExtractor("sql-select").then(() => {
+      expect(extractDataGridSelection).toHaveBeenCalledWith(
+        expect.objectContaining({
+          columns: [expect.objectContaining({ displayName: "id", sourceName: "id" })],
+          selectedColumnIndexes: [0],
+          rows: [[7]],
+        }),
+      );
+    });
   });
 
   it("enables INSERT/UPDATE when right-clicking a previously selected primary-key cell", () => {
@@ -852,6 +900,40 @@ describe("useDataGridExport prepared row statements", () => {
     await expect(state.copyWithExtractor("json")).resolves.toBe(false);
     expect(extractDataGridSelection).not.toHaveBeenCalled();
     expect(toast).toHaveBeenCalledWith("grid.copyExtractorUnsupportedSelection", 5000);
+  });
+
+  it("uses the right-clicked cell for SQL predicates despite an irregular discrete selection", async () => {
+    const state = createExportState(
+      editableTable,
+      ["id", "name"],
+      undefined,
+      undefined,
+      { columns: ["id", "name"], rows: [[1], ["Grace"]] },
+      [
+        [1, "Ada"],
+        [2, "Grace"],
+      ],
+      [],
+      DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      false,
+      undefined,
+      false,
+      2,
+      1,
+    );
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "name = 'Grace'", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+
+    expect(state.canCopyWithExtractor("where-clause")).toBe(true);
+    await expect(state.copyWithExtractor("where-clause")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "where-clause",
+        columns: [expect.objectContaining({ sourceName: "name" })],
+        selectedColumnIndexes: [0],
+        rows: [["Grace"]],
+      }),
+    );
   });
 
   it("limits live extractor previews to the first 100 selected rows", async () => {

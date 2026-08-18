@@ -19,6 +19,7 @@ export interface ParsedConnectionUrl {
   useMongoUrl?: boolean;
   portExplicit?: boolean;
   apiPath?: string;
+  basePath?: string;
 }
 
 export type ConnectionProfile = {
@@ -48,6 +49,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   zookeeper: { type: "zookeeper", profile: "zookeeper", label: "Apache ZooKeeper", defaultPort: 2181 },
   mongodb: { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
+  dynamodb: { type: "dynamodb", profile: "dynamodb", label: "Amazon DynamoDB", defaultPort: 443 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
@@ -82,6 +84,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
 
 const HTTP_SELECTED_PROFILES: Record<string, ConnectionProfile> = {
   clickhouse: SCHEME_PROFILES.clickhouse,
+  dynamodb: SCHEME_PROFILES.dynamodb,
   elasticsearch: SCHEME_PROFILES.elasticsearch,
   easysearch: SCHEME_PROFILES.easysearch,
   meilisearch: SCHEME_PROFILES.meilisearch,
@@ -189,6 +192,10 @@ function databaseFromPath(pathname: string): string | undefined {
   return decodeUrlPart(value.split("/")[0]);
 }
 
+function dynamodbRegionFromHost(hostname: string): string | undefined {
+  return hostname.toLowerCase().match(/^dynamodb(?:-fips)?\.([a-z0-9-]+)\.(?:amazonaws\.com(?:\.cn)?|api\.aws)$/)?.[1];
+}
+
 function parseZooKeeperUrl(source: string): ParsedConnectionUrl | null {
   const match = source.match(/^zookeeper:\/\/([^/?#]+)(\/[^?#]*)?(\?[^#]*)?$/i);
   if (!match) return null;
@@ -248,6 +255,31 @@ function queryParamValue(params: string, key: string): string | undefined {
     }
   }
   return undefined;
+}
+
+function extractHiveStructuredParams(params: string): { username?: string; password?: string; ssl: boolean; urlParams: string } {
+  let username: string | undefined;
+  let password: string | undefined;
+  let ssl = false;
+  const urlParams: string[] = [];
+
+  for (const part of params.split(";")) {
+    if (!part) continue;
+    const [rawKey, ...rest] = part.split("=");
+    const key = decodeUrlPart(rawKey).trim().toLowerCase();
+    const value = decodeUrlPart(rest.join("=")).trim();
+    if (key === "user" || key === "username") {
+      username = value;
+    } else if (key === "password") {
+      password = value;
+    } else if (key === "ssl") {
+      ssl = value.toLowerCase() === "true";
+    } else {
+      urlParams.push(part);
+    }
+  }
+
+  return { username, password, ssl, urlParams: urlParams.join(";") };
 }
 
 function connectionNameParam(parsed: URL): string | undefined {
@@ -332,6 +364,40 @@ export function connectionProfileForScheme(scheme: string, preferredProfile?: st
     return SCHEME_PROFILES[normalizedPreferredProfile];
   }
   return SCHEME_PROFILES[normalizedScheme];
+}
+
+function parseJdbcHiveUrl(source: string): ParsedConnectionUrl | null {
+  const match = /^jdbc:hive2:\/\/(?<hosts>[^/?#;]+)(?:\/(?<path>[^?#]*))?(?<query>\?[^#]*)?(?<fragment>#.*)?$/i.exec(source);
+  if (!match?.groups) return null;
+
+  const firstHost = match.groups.hosts.split(",")[0]?.trim();
+  if (!firstHost) return null;
+
+  let endpoint: URL;
+  try {
+    endpoint = new URL(`hive2://${firstHost}`);
+  } catch {
+    return null;
+  }
+  if (!endpoint.hostname) return null;
+
+  const [rawDatabase = "", ...paramParts] = (match.groups.path || "").split(";");
+  const structured = extractHiveStructuredParams(paramParts.join(";"));
+  const urlParams = `${structured.urlParams}${match.groups.query || ""}${match.groups.fragment || ""}`;
+
+  return {
+    dbType: "hive",
+    driverProfile: "hive",
+    driverLabel: "Apache Hive",
+    host: endpoint.hostname.replace(/^\[(.*)]$/, "$1"),
+    port: endpoint.port ? Number(endpoint.port) : 10000,
+    username: structured.username ?? decodeUrlPart(endpoint.username),
+    password: structured.password ?? decodeUrlPart(endpoint.password),
+    database: decodeUrlPart(rawDatabase) || undefined,
+    urlParams,
+    ssl: structured.ssl,
+    connectionString: source,
+  };
 }
 
 function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
@@ -573,6 +639,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   if (!input) {
     throw new Error("Connection URL is empty");
   }
+  const jdbcHive = parseJdbcHiveUrl(input);
+  if (jdbcHive) return jdbcHive;
   const jdbcH2 = parseH2JdbcUrl(input);
   if (jdbcH2) return jdbcH2;
   const jdbcUCanAccess = parseJdbcUCanAccessUrl(input);
@@ -651,20 +719,24 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     };
   }
 
+  const isMeilisearch = profile.type === "meilisearch";
+  const defaultPort = isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
+
   return {
     ...(name ? { name } : {}),
     dbType: profile.type,
     driverProfile: profile.profile,
     driverLabel: profile.label,
     host: parsed.hostname,
-    port: parsed.port ? Number(parsed.port) : profile.defaultPort,
+    port: parsed.port ? Number(parsed.port) : defaultPort,
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
     username: mysqlCredentials?.username ?? decodeUrlPart(parsed.username),
     password: mysqlCredentials?.password ?? decodeUrlPart(parsed.password),
-    database: profile.type === "victoriametrics" ? "metrics" : databaseFromPath(parsed.pathname),
+    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch ? undefined : databaseFromPath(parsed.pathname),
     urlParams: effectiveUrlParams,
     ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
+    ...(isMeilisearch ? { basePath: parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "") } : {}),
   };
 }
 
@@ -711,11 +783,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+export function applyMeilisearchBasePathToExternalConfig(existing: unknown, basePath: string | undefined): unknown {
+  const next = isRecord(existing) ? { ...existing } : {};
+  delete next.base_path;
+  if (basePath) {
+    next.basePath = basePath;
+  } else {
+    delete next.basePath;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 function parsedExternalConfig(existing: unknown, parsed: ParsedConnectionUrl): unknown {
   if (parsed.dbType === "victoriametrics") {
     const next = isRecord(existing) ? { ...existing } : {};
     next.apiPath = parsed.apiPath || "/prometheus";
     return next;
+  }
+  if (parsed.dbType === "meilisearch") {
+    return applyMeilisearchBasePathToExternalConfig(existing, parsed.basePath);
   }
   if (parsed.dbType !== "sqlserver") return existing;
 
@@ -740,7 +826,7 @@ export function applyParsedConnectionUrl(config: Omit<ConnectionConfig, "id">, p
     name: parsed.name?.trim() || config.name,
     username: applyParsedUsername(config, parsed),
     password: applyParsedPassword(config, parsed),
-    database: parsed.database,
+    database: parsed.dbType === "dynamodb" ? parsed.database || config.database || "us-east-1" : parsed.database,
     url_params: parsed.urlParams,
     ssl: parsed.ssl,
     connection_string: parsed.connectionString,
