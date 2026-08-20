@@ -4,7 +4,7 @@ import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { AlertTriangle, ArrowLeft, Check, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, Check, CheckCircle2, CircleHelp, Cloud, Copy, Download, ExternalLink, GripVertical, Loader2, Moon, PackageSearch, Palette, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Sun, SunMoon, Terminal, Trash2, Upload, X } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -58,6 +58,8 @@ import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { isAiConnectionTestConfigCurrent } from "@/lib/ai/aiConnectionTest";
 import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
+import DataGridTypeColorSchemeDialog from "@/components/grid/DataGridTypeColorSchemeDialog.vue";
+import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, cloneDataGridTypeColorSchemes, type DataGridTypeColorScheme } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
 import DangerConfirmDialog from "./DangerConfirmDialog.vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -110,7 +112,7 @@ import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sq
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES, tableColumnTemplateRowsToSettings } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, normalizeSqlVariableSyntaxOverrides, SQL_VARIABLE_SYNTAX_DATABASE_TYPES, SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS, type SqlVariableSyntaxOverrides, type SqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
-import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
+import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
 import { beginMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
@@ -144,6 +146,7 @@ import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE } from "@/lib/dataGrid/pagin
 import { MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import type { PromptTemplate } from "@/types/promptTemplate";
 import { GLOBAL_INSTRUCTIONS_MAX, PROMPT_TEMPLATE_CONTENT_MAX, PROMPT_TEMPLATE_NAME_MAX, promptTemplateCharacterCount } from "@/types/promptTemplate";
+import { METADATA_CACHE_HARD_MAX_MEMORY_MB, METADATA_CACHE_MIN_MEMORY_MB, normalizeMetadataCacheMemoryMb } from "@/lib/metadata/metadataRuntimeCache";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -305,7 +308,10 @@ const editUiScale = ref(settingsStore.editorSettings.uiScale);
 const editTheme = ref(settingsStore.editorSettings.theme);
 const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.customThemes]);
 const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThemeId);
+const editDataGridTypeColorSchemes = ref<DataGridTypeColorScheme[]>(cloneDataGridTypeColorSchemes(settingsStore.editorSettings.dataGridTypeColorSchemes));
+const editActiveDataGridTypeColorSchemeId = ref(settingsStore.editorSettings.activeDataGridTypeColorSchemeId);
 const showThemeCustomizer = ref(false);
+const showDataGridTypeColorScheme = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 function translateWithExecuteShortcut(key: string): string {
@@ -337,6 +343,7 @@ const editQuitOnClose = ref(settingsStore.desktopSettings.quit_on_close);
 const desktopCloseBehaviorResetPending = ref(false);
 const editIconTheme = ref<DesktopIconTheme>(settingsStore.desktopSettings.icon_theme);
 const editDebugLoggingEnabled = ref(settingsStore.desktopSettings.debug_logging_enabled);
+const editMetadataCacheMaxMemoryMb = ref(settingsStore.desktopSettings.metadata_cache_max_memory_mb);
 const editDuckDbWorkerProcessIsolation = ref(settingsStore.desktopSettings.duckdb_worker_process_isolation);
 const editDuckDbWorkerMaxProcesses = ref(settingsStore.desktopSettings.duckdb_worker_max_processes);
 const startupDuckDbWorkerProcessIsolation = ref(settingsStore.desktopSettings.duckdb_worker_process_isolation);
@@ -533,6 +540,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showColumnTypesInHeader: editShowColumnTypesInHeader.value,
     dataGridShowTransposeFieldMetadata: editDataGridShowTransposeFieldMetadata.value,
     colorizeDataGridCellTypes: editColorizeDataGridCellTypes.value,
+    dataGridTypeColorSchemes: editDataGridTypeColorSchemes.value,
+    activeDataGridTypeColorSchemeId: editActiveDataGridTypeColorSchemeId.value,
     showIndexIndicatorsInHeader: editShowIndexIndicatorsInHeader.value,
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     dataGridQuickEntry: editDataGridQuickEntry.value,
@@ -816,6 +825,8 @@ function syncEditorSettingsDraftFromStore() {
   editShowColumnTypesInHeader.value = settingsStore.editorSettings.showColumnTypesInHeader;
   editDataGridShowTransposeFieldMetadata.value = settingsStore.editorSettings.dataGridShowTransposeFieldMetadata;
   editColorizeDataGridCellTypes.value = settingsStore.editorSettings.colorizeDataGridCellTypes;
+  editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(settingsStore.editorSettings.dataGridTypeColorSchemes);
+  editActiveDataGridTypeColorSchemeId.value = settingsStore.editorSettings.activeDataGridTypeColorSchemeId;
   editShowIndexIndicatorsInHeader.value = settingsStore.editorSettings.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
@@ -878,6 +889,7 @@ watch(
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editMetadataCacheMaxMemoryMb.value = settingsStore.desktopSettings.metadata_cache_max_memory_mb;
       editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     }
@@ -951,6 +963,7 @@ function hasChanges(): boolean {
     editQuitOnClose.value !== settingsStore.desktopSettings.quit_on_close ||
     editIconTheme.value !== settingsStore.desktopSettings.icon_theme ||
     editDebugLoggingEnabled.value !== settingsStore.desktopSettings.debug_logging_enabled ||
+    editMetadataCacheMaxMemoryMb.value !== settingsStore.desktopSettings.metadata_cache_max_memory_mb ||
     editDuckDbWorkerProcessIsolation.value !== settingsStore.desktopSettings.duckdb_worker_process_isolation ||
     normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value) !== settingsStore.desktopSettings.duckdb_worker_max_processes ||
     editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE)
@@ -967,16 +980,19 @@ async function persistSettings() {
     await settingsStore.persistEditorSettings();
     editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
   }
+  const metadataCacheMaxMemoryMb = normalizeMetadataCacheMemoryMb(editMetadataCacheMaxMemoryMb.value);
   await settingsStore.updateDesktopSettings({
     show_tray_icon: editShowTrayIcon.value,
     quit_on_close: editQuitOnClose.value,
     close_action_prompted: desktopCloseBehaviorResetPending.value ? false : true,
     icon_theme: editIconTheme.value,
     debug_logging_enabled: editDebugLoggingEnabled.value,
+    metadata_cache_max_memory_mb: metadataCacheMaxMemoryMb,
     duckdb_worker_process_isolation: editDuckDbWorkerProcessIsolation.value,
     duckdb_worker_max_processes: normalizeDuckDbWorkerMaxProcesses(editDuckDbWorkerMaxProcesses.value),
     sidebar_table_page_size: editSidebarTablePageSize.value,
   });
+  editMetadataCacheMaxMemoryMb.value = settingsStore.desktopSettings.metadata_cache_max_memory_mb;
   desktopCloseBehaviorResetPending.value = false;
   if (sidebarObjectDisplayChanged) {
     await connectionStore.refreshAllTree();
@@ -1072,6 +1088,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     desktopCloseBehaviorResetPending.value = true;
     editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
     editDebugLoggingEnabled.value = DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled;
+    editMetadataCacheMaxMemoryMb.value = DEFAULT_DESKTOP_SETTINGS.metadata_cache_max_memory_mb;
   } else if (tab === "navigation") {
     editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
@@ -1098,6 +1115,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
     editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
+    // Back to the built-in palette, but keep the user's saved schemes available.
+    editActiveDataGridTypeColorSchemeId.value = DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId;
     editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
@@ -1165,6 +1184,7 @@ function resetAllDefaults() {
   desktopCloseBehaviorResetPending.value = true;
   editIconTheme.value = DEFAULT_DESKTOP_SETTINGS.icon_theme;
   editDebugLoggingEnabled.value = DEFAULT_DESKTOP_SETTINGS.debug_logging_enabled;
+  editMetadataCacheMaxMemoryMb.value = DEFAULT_DESKTOP_SETTINGS.metadata_cache_max_memory_mb;
   editDuckDbWorkerProcessIsolation.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_process_isolation;
   editDuckDbWorkerMaxProcesses.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_max_processes;
   editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
@@ -1172,6 +1192,8 @@ function resetAllDefaults() {
   editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
   editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
   editColorizeDataGridCellTypes.value = DEFAULT_EDITOR_SETTINGS.colorizeDataGridCellTypes;
+  // Reset the selection only; saved schemes survive a full settings reset.
+  editActiveDataGridTypeColorSchemeId.value = DEFAULT_EDITOR_SETTINGS.activeDataGridTypeColorSchemeId;
   editShowIndexIndicatorsInHeader.value = DEFAULT_EDITOR_SETTINGS.showIndexIndicatorsInHeader;
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
@@ -1408,6 +1430,16 @@ function handleThemeSave(updatedThemes: CustomTheme[], activeId: string) {
   editTheme.value = "custom";
   showThemeCustomizer.value = false;
 }
+
+function handleDataGridTypeColorSchemeChange(schemes: DataGridTypeColorScheme[], activeId: string) {
+  editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(schemes);
+  editActiveDataGridTypeColorSchemeId.value = activeId;
+}
+
+const activeDataGridTypeColorSchemeName = computed(() => {
+  if (editActiveDataGridTypeColorSchemeId.value === DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID) return t("settings.dataGridTypeColorSchemeAuto");
+  return editDataGridTypeColorSchemes.value.find((scheme) => scheme.id === editActiveDataGridTypeColorSchemeId.value)?.name ?? t("settings.dataGridTypeColorSchemeAuto");
+});
 
 function onDisconnectTabHandlingModeChange(v: any) {
   if (v === "close-tabs" || v === "keep-tabs-clear-results" || v === "keep-tabs-keep-results") {
@@ -1782,7 +1814,7 @@ async function exportDebugLogs() {
 }
 
 // ---------- MCP Server ----------
-type McpConfigTab = "claude" | "cursor" | "trae" | "vscode" | "windsurf" | "codex" | "opencode" | "pi" | "cherry-studio";
+type McpConfigTab = "claude" | "cursor" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio";
 type McpCopyKind = "install" | "uninstall" | `${McpConfigTab}-config`;
 
 const mcpStatus = ref<McpServerStatus | null>(null);
@@ -1892,6 +1924,7 @@ const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpLaunch
 const mcpCherryStudioRecommendedConfig = computed(() => buildMcpCherryStudioConfig(mcpLaunchConfig.value));
 
 const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpLaunchConfig.value));
+const mcpDeepSeekHarnessRecommendedConfig = computed(() => buildMcpDeepSeekHarnessConfig(mcpLaunchConfig.value));
 
 const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpLaunchConfig.value));
 const mcpPiRecommendedConfig = computed(() => buildMcpPiConfig(mcpLaunchConfig.value));
@@ -2418,6 +2451,7 @@ watch(
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
       editDebugLoggingEnabled.value = settingsStore.desktopSettings.debug_logging_enabled;
+      editMetadataCacheMaxMemoryMb.value = settingsStore.desktopSettings.metadata_cache_max_memory_mb;
       editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
       editDuckDbWorkerMaxProcesses.value = settingsStore.desktopSettings.duckdb_worker_max_processes;
       if (!duckDbWorkerStartupCaptured.value) {
@@ -4960,6 +4994,21 @@ onUnmounted(() => {
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.dataGridDisplay") }}
                 </div>
+                <div data-settings-search-id="data-grid-type-colors" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('data-grid-type-colors')]">
+                  <div class="space-y-1 min-w-0">
+                    <Label>{{ t("settings.dataGridTypeColorScheme") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.dataGridTypeColorSchemeDescription") }}
+                    </p>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <span class="text-xs text-muted-foreground">{{ activeDataGridTypeColorSchemeName }}</span>
+                    <Button variant="outline" class="h-9 w-auto px-4" @click="showDataGridTypeColorScheme = true">
+                      <Palette class="mr-2 h-4 w-4" />
+                      {{ t("settings.dataGridTypeColorSchemeConfigure") }}
+                    </Button>
+                  </div>
+                </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="data-grid-filter-view">
@@ -5322,6 +5371,26 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="query-export-keyset-enabled" v-model="editQueryExportKeysetOptimizationEnabled" class="mt-0.5" />
+                </div>
+              </div>
+
+              <Separator />
+
+              <div data-settings-search-id="data-performance" :class="['space-y-3', settingsSearchTargetClass('data-performance')]">
+                <div class="text-sm font-medium text-muted-foreground">
+                  {{ t("settings.performanceSection") }}
+                </div>
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="metadata-cache-memory-limit">{{ t("settings.metadataCacheMemoryLimit") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.metadataCacheMemoryLimitDescription") }}
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <Input id="metadata-cache-memory-limit" v-model.number="editMetadataCacheMaxMemoryMb" type="number" :min="METADATA_CACHE_MIN_MEMORY_MB" :max="METADATA_CACHE_HARD_MAX_MEMORY_MB" :step="16" class="h-8 w-24 text-right" />
+                    <span class="text-xs text-muted-foreground">MB</span>
+                  </div>
                 </div>
               </div>
 
@@ -6565,6 +6634,7 @@ onUnmounted(() => {
                     <TabsTrigger value="vscode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>
                     <TabsTrigger value="windsurf" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Windsurf</TabsTrigger>
                     <TabsTrigger value="codex" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Codex</TabsTrigger>
+                    <TabsTrigger value="deepseek-harness" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">DeepSeek Harness</TabsTrigger>
                     <TabsTrigger value="opencode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">OpenCode</TabsTrigger>
                     <TabsTrigger value="pi" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Pi</TabsTrigger>
                     <TabsTrigger value="cherry-studio" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cherry Studio</TabsTrigger>
@@ -6649,6 +6719,21 @@ onUnmounted(() => {
                         <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpCodexRecommendedConfig }}</code></pre>
                         <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('codex-config', mcpCodexRecommendedConfig)">
                           <CheckCircle2 v-if="mcpCopied === 'codex-config'" class="h-3.5 w-3.5 text-green-500" />
+                          <Copy v-else class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="deepseek-harness" class="m-0">
+                    <div class="space-y-2">
+                      <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                        {{ t("settings.mcpDeepSeekHarnessConfigPath") }}
+                      </div>
+                      <div class="relative rounded-md border bg-background p-3">
+                        <pre class="overflow-x-auto whitespace-pre text-xs leading-relaxed"><code>{{ mcpDeepSeekHarnessRecommendedConfig }}</code></pre>
+                        <Button type="button" variant="outline" size="icon" class="absolute right-2 top-2 h-7 w-7" :title="t('common.copy')" @click="copyMcpText('deepseek-harness-config', mcpDeepSeekHarnessRecommendedConfig)">
+                          <CheckCircle2 v-if="mcpCopied === 'deepseek-harness-config'" class="h-3.5 w-3.5 text-green-500" />
                           <Copy v-else class="h-3.5 w-3.5" />
                         </Button>
                       </div>
@@ -6990,6 +7075,7 @@ onUnmounted(() => {
 
     <!-- Theme Customizer Dialog -->
     <ThemeCustomizerDialog v-model:open="showThemeCustomizer" :themes="editCustomThemes" :active-theme-id="editActiveCustomThemeId" @save="handleThemeSave" />
+    <DataGridTypeColorSchemeDialog v-model:open="showDataGridTypeColorScheme" :schemes="editDataGridTypeColorSchemes" :active-scheme-id="editActiveDataGridTypeColorSchemeId" @change="handleDataGridTypeColorSchemeChange" />
 
     <!-- Snippet Add/Edit Dialog -->
     <Dialog :open="snippetDialogOpen" @update:open="snippetDialogOpen = $event">
@@ -7103,6 +7189,32 @@ onUnmounted(() => {
 
 .settings-option-stack > * + * {
   margin-top: 0.625rem;
+}
+
+.settings-mcp-config-tabs {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--muted-foreground) 22%, transparent) transparent;
+}
+
+.settings-mcp-config-tabs:hover {
+  scrollbar-color: color-mix(in oklab, var(--muted-foreground) 38%, transparent) transparent;
+}
+
+.settings-mcp-config-tabs::-webkit-scrollbar {
+  height: 3px;
+}
+
+.settings-mcp-config-tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-mcp-config-tabs::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--muted-foreground) 22%, transparent);
+}
+
+.settings-mcp-config-tabs:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--muted-foreground) 38%, transparent);
 }
 
 html.dbx-legacy-webview .settings-shortcut-row:hover .settings-shortcut-action-button,

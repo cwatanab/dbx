@@ -144,11 +144,12 @@ export function useSqlExecution(deps: {
 
   async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number; editorViewportRequestId?: number }> {
     const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type, settingsStore.editorSettings.sqlVariableSubstitutionEnabled).atSet;
-    const expand = (sql: string) => (atSetEnabled ? expandSqlVariables(sql).sql : sql);
+    const expand = (sql: string, declarationSql?: string) => (atSetEnabled ? expandSqlVariables(sql, { declarationSql }).sql : sql);
     if (typeof source === "string") return { sql: expand(source) };
 
     const resolved = deps.resolveExecutableSql ? await deps.resolveExecutableSql(source) : isSqlExecutionSnapshot(source) ? resolveExecutableSql(source.fullSql, source.selectedSql, { cursorPos: source.cursorPos }) : deps.executableSql.value;
-    const sql = expand(resolved);
+    const declarationSql = isSqlExecutionSnapshot(source) ? source.fullSql.slice(0, source.selectionTo) : resolved;
+    const sql = expand(resolved, declarationSql);
     const editorViewportRequestId = isSqlExecutionSnapshot(source) ? source.editorViewportRequestId : undefined;
     if (!isSqlExecutionSnapshot(source) || !source.selectedSql.trim() || sql !== resolved) return { sql, editorViewportRequestId };
 
@@ -235,7 +236,8 @@ export function useSqlExecution(deps: {
   }
 
   function prepareSqlParameterDialog(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}, continuation?: (sql: string, sourceOffset?: number) => Promise<void> | void): boolean {
-    const databaseType = deps.activeConnection.value?.db_type;
+    const connection = deps.activeConnection.value;
+    const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
     const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
     const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
     const parameters = extractSqlParameterDescriptors(sql, { databaseType, enabledSyntaxes });
@@ -326,6 +328,7 @@ export function useSqlExecution(deps: {
     if (success) {
       const refreshTarget = sqlMetadataRefreshTarget(sql, tab.schema);
       if (refreshTarget.scope === "connection") {
+        connectionStore.invalidateMetadataCache(tab.connectionId);
         await connectionStore.loadDatabases(tab.connectionId, { force: true });
       } else if (refreshTarget.scope === "database") {
         await connectionStore.refreshObjectListTreeNode(tab.connectionId, tab.database, refreshTarget.schema);
@@ -467,6 +470,7 @@ export function useSqlExecution(deps: {
       if (success) {
         const refreshTarget = sqlMetadataRefreshTarget(sql, executionTab.schema);
         if (refreshTarget.scope === "connection") {
+          connectionStore.invalidateMetadataCache(executionTab.connectionId);
           await connectionStore.loadDatabases(executionTab.connectionId, { force: true });
         } else if (refreshTarget.scope === "database") {
           await connectionStore.refreshObjectListTreeNode(executionTab.connectionId, executionTab.database, refreshTarget.schema);

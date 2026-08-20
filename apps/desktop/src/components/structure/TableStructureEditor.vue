@@ -56,6 +56,7 @@ import {
   createForeignKeyDrafts,
   createIndexDrafts,
   createTriggerDrafts,
+  dataTypeBaseInputValue,
   dataTypeLengthInputValue,
   dataTypeLengthUnitValue,
   defaultNewColumnDataType,
@@ -79,7 +80,6 @@ import {
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
   sameStructureIndexType,
-  splitDataType,
   tableStructureIdentifierComparisonKey,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
@@ -891,13 +891,13 @@ const targetLabel = computed(() => buildStructureTargetLabel(connection.value?.n
 
 function isManticoreTextColumn(column: EditableStructureColumn): boolean {
   if (databaseType.value !== "manticoresearch") return false;
-  const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType).trim().toLowerCase();
   return baseType === "text" || baseType === "string";
 }
 
 function isManticoreJsonColumn(column: EditableStructureColumn): boolean {
   if (databaseType.value !== "manticoresearch") return false;
-  return splitDataType(column.dataType).baseType.trim().toLowerCase() === "json";
+  return dataTypeBaseInputValue(databaseType.value, column.dataType).trim().toLowerCase() === "json";
 }
 
 let sqlPreviewRequestId = 0;
@@ -1505,7 +1505,7 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "disk" | "remote" }> {
+function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
   return loadObjectMetadataFacet(request, "comment", () => fetchTableCommentValue(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
 }
 
@@ -1547,22 +1547,22 @@ async function loadStructure(
     const columnsPromise = scope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value) : Promise.resolve(undefined);
     const indexesPromise = scope.indexes
       ? tableMetadataCapabilities.value.indexes
-        ? loadObjectMetadataFacet(metadataRequest, "indexes", () => api.listIndexes(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        ? loadObjectMetadataFacet(metadataRequest, "indexes", () => api.listIndexes(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     const foreignKeysPromise = scope.foreignKeys
       ? tableMetadataCapabilities.value.foreignKeys
-        ? loadObjectMetadataFacet(metadataRequest, "foreign-keys", () => api.listForeignKeys(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        ? loadObjectMetadataFacet(metadataRequest, "foreign-keys", () => api.listForeignKeys(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     const constraintsPromise = scope.constraints
       ? tableMetadataCapabilities.value.constraints
-        ? loadObjectMetadataFacet(metadataRequest, "constraints", () => api.listConstraints(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        ? loadObjectMetadataFacet(metadataRequest, "constraints", () => api.listConstraints(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     const triggersPromise = scope.triggers
       ? tableMetadataCapabilities.value.triggers
-        ? loadObjectMetadataFacet(metadataRequest, "triggers", () => api.listTriggers(connectionId, database, schema, tableName, catalog).catch(() => []), { force: forceMetadata }).then((result) => result.value)
+        ? loadObjectMetadataFacet(metadataRequest, "triggers", () => api.listTriggers(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
     const tableCommentPromise = scope.tableComment && structureCapabilities.value.comment ? loadCachedTableComment(metadataRequest, forceMetadata).then((result) => result.value) : Promise.resolve(undefined);
@@ -1636,6 +1636,7 @@ async function loadStructure(
     const secondaryMetadataPromise = applySecondaryMetadata()
       .catch((error) => {
         console.warn("[DBX][structure-editor:secondary-metadata-failed]", error);
+        if (showErrors && requestId === structureLoadRequestId) errorMessage.value = error?.message || String(error);
       })
       .finally(() => {
         if (requestId === structureLoadRequestId) setSecondaryMetadataLoading(scope, false);
@@ -2060,14 +2061,14 @@ function removeMysqlEnumValue(column: EditableStructureColumn, index: number) {
 }
 
 function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
-  const baseType = splitDataType(column.dataType).baseType;
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType);
   column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, String(value), dataTypeLengthUnitValue(databaseType.value, column.dataType));
   syncSqlServerIdentityForDataType(column);
   syncDamengIdentityForDataType(column);
 }
 
 function updateColumnDataTypeLengthUnit(column: EditableStructureColumn, value: unknown) {
-  const baseType = splitDataType(column.dataType).baseType;
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType);
   const unit = value === "__default" ? "" : String(value ?? "");
   column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, dataTypeLengthInputValue(databaseType.value, column.dataType), unit);
   syncSqlServerIdentityForDataType(column);
@@ -2376,7 +2377,7 @@ function isColumnLengthDisabled(column: EditableStructureColumn): boolean {
   if (isColumnTypeDisabled(column)) {
     return true;
   }
-  const baseType = splitDataType(column.dataType).baseType.trim().toLowerCase();
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType).trim().toLowerCase();
   return isDataTypeLengthDisabled(databaseType.value, baseType);
 }
 
@@ -3319,7 +3320,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                   <td :class="structureCellClass">
                     <SearchableSelect
                       v-if="!isColumnTypeDisabled(column)"
-                      :model-value="splitDataType(column.dataType).baseType"
+                      :model-value="dataTypeBaseInputValue(databaseType, column.dataType)"
                       :options="dataTypeOptions"
                       :placeholder="t('structureEditor.typePlaceholder')"
                       :search-placeholder="t('structureEditor.typePlaceholder')"
@@ -3331,7 +3332,7 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                       :trigger-class="[structureMonoControlClass, 'w-full']"
                       @update:model-value="(v: string) => updateColumnDataType(column, v)"
                     />
-                    <Input v-else :model-value="gaussdbMDataTypeDisplayName(splitDataType(column.dataType).baseType)" :class="[structureMonoControlClass, 'w-full']" disabled />
+                    <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureMonoControlClass, 'w-full']" disabled />
                   </td>
                   <td v-if="columnEditorControls.length" :class="structureCellClass">
                     <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">

@@ -39,9 +39,10 @@ import { supportsClearableQuerySchema } from "@/lib/database/databaseFeatureSupp
 import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
+import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
-import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
+import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, tableMetadataToDataTabMeta, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
@@ -2819,26 +2820,55 @@ export const useQueryStore = defineStore("query", () => {
   async function refreshDataTabInternal(id: string, options?: { supersedeBusy?: boolean; propagateBuildError?: boolean }): Promise<boolean> {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab || tab.mode !== "data" || (tab.isExecuting && !options?.supersedeBusy)) return false;
-    const tableMeta = tableMetaForDataTab(tab);
-    if (!tableMeta?.tableName) return false;
 
     const connStore = useConnectionStore();
     const conn = connStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const identifierQuote = connStore.connectionIdentifierQuote?.(tab.connectionId);
-    clearInvalidDataTabSortState(tab, tableMeta.columns);
-    const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-    const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
-    const orderBy = tab.orderByInput?.trim() || sortOrder;
-    const limit = tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
-    const offset = tab.resultPageOffset ?? 0;
-    const useDriverRowOffset = conn?.db_type === "jdbc" && effectiveDbType === "iris";
     const refreshPreparationId = uuid();
 
     // Reserve the tab synchronously before SQL construction yields so repeated
     // refresh requests cannot build and execute duplicate queries.
     setExecutingWithId(tab.id, refreshPreparationId);
     try {
+      let tableMeta = tableMetaForDataTab(tab);
+      if (!tableMeta?.tableName) return false;
+
+      // 生命周期代次校验：disconnect / 关库 / 死池重连后的首次刷新必须先从
+      // 新连接源头重建结构，否则旧显式列列表会生成错误 SELECT（issue #6623 /
+      // PR #6640 review blocker 2）。reload 路径不读 tableMetaUpdatedAt 风干
+      // 判定、只读 tableMeta 本身，因此在这里显式强制重建。
+      const connectionGeneration = connStore.metadataGenerationFor(tab.connectionId, tab.database);
+      if (isDataTabMetadataLifecycleStale(tab, connectionGeneration)) {
+        const metadataGenerationAtStart = connectionGeneration;
+        const reloadedMetadata = await loadTableMetadata({
+          connectionId: tab.connectionId,
+          database: tab.database,
+          schema: tableMeta.schema,
+          tableName: tableMeta.tableName,
+          tableType: tableMeta.tableType,
+          catalog: tableMeta.catalog,
+          databaseType: effectiveDbType ?? conn?.db_type ?? "",
+          driverProfile: conn?.driver_profile,
+          force: true,
+        });
+        // 重建期间又跨越了一次连接生命周期边界 → 放弃本次刷新，避免旧结果
+        // 二次写回 tab（PR #6640 review blocker 1 的 tab-local 半边）
+        if (connStore.metadataGenerationFor(tab.connectionId, tab.database) !== metadataGenerationAtStart) return false;
+        const current = tabs.value.find((candidate) => candidate.id === id);
+        if (!current || current.executionId !== refreshPreparationId) return false;
+        setTableMeta(tab.id, tableMetadataToDataTabMeta(reloadedMetadata.metadata, { schema: tableMeta.schema }));
+        tableMeta = tableMetaForDataTab(tab) ?? tableMeta;
+      }
+
+      clearInvalidDataTabSortState(tab, tableMeta.columns);
+      const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
+      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const orderBy = tab.orderByInput?.trim() || sortOrder;
+      const limit = tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+      const offset = tab.resultPageOffset ?? 0;
+      const useDriverRowOffset = conn?.db_type === "jdbc" && effectiveDbType === "iris";
+
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         driverProfile: conn?.driver_profile,
@@ -2911,6 +2941,21 @@ export const useQueryStore = defineStore("query", () => {
 
   function releaseDatabaseTabs(connectionId: string, database: string) {
     releaseTabsWhere((tab) => tab.connectionId === connectionId && tab.database === database);
+  }
+
+  /**
+   * 连接生命周期边界（断开连接 / 关闭数据库连接 / 后端连接池失效重连）。
+   * 数据标签页的 tableMeta 为展示/编辑保留（不清除 UI、主键与编辑安全门控），
+   * 但清掉 freshness 戳：此后 openData 的 tab-local 暖缓存判定、激活路径的
+   * stale 判定、以及网格 reload 的 metadata age 判定全部按"冷缓存"处理，
+   * 即使位于 30s TTL 窗口内也会重新拉取结构（issue #6623）。
+   */
+  function staleConnectionDataTabMetadata(connectionId: string, database?: string) {
+    for (const tab of tabs.value) {
+      if (tab.mode !== "data" || tab.connectionId !== connectionId) continue;
+      if (database != null && tab.database !== database) continue;
+      tab.tableMetaUpdatedAt = undefined;
+    }
   }
 
   function isDatabaseOpen(connectionId: string, database: string) {
@@ -3297,6 +3342,10 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
       tab.tableMeta = meta;
+      // 记录写入时的连接元数据代次：disconnect/关库/死池重连会使该代次递增，
+      // 代次失配视同冷缓存，即使位于 30s TTL 窗口内也会重建结构（issue #6623 /
+      // PR #6640）。同一代次内的多次写入与连接Store保持一致，无需额外入参。
+      tab.tableMetaGeneration = useConnectionStore().metadataGenerationFor(tab.connectionId, tab.database) ?? 0;
       tab.tableMetaUpdatedAt = Date.now();
       if (meta.columns.length > 0) clearInvalidDataTabSortState(tab, meta.columns);
       // 只有真实元数据（columns 非空）落地才结束行标识等待；多处调用方会先写
@@ -3447,15 +3496,15 @@ export const useQueryStore = defineStore("query", () => {
   };
 
   /**
-   * Resolve multi-source result columns (by projection ordinal) back to exactly
-   * one base column per source, then surface the resolved column comments and a
-   * display-only result->source mapping. Reuses the same database-aware binder
+   * Resolve result columns (by projection ordinal) back to exactly one base
+   * column per source, then surface the resolved column comments and a
+   * result->source mapping. Reuses the same database-aware binder
    * as the editability analysis, so `name AS username` (uniquely resolvable
    * unqualified alias) maps back to its physical column and quoted mixed-case
    * identifiers keep exact casing. Ambiguous or unresolved columns yield
    * `undefined` (no comment) instead of first-source-wins on a shared name.
    */
-  function resolveMultiSourceColumnInfo(dbType: string, analysis: EditableQueryInfo, resultColumns: string[], loadedSources: LoadedEditableSource[]): { comments: Array<string | undefined>; mapping: Array<QueryResultSourceColumnRef | undefined> } {
+  function resolveResultColumnInfo(dbType: string, analysis: EditableQueryInfo, resultColumns: string[], loadedSources: LoadedEditableSource[]): { comments: Array<string | undefined>; mapping: Array<QueryResultSourceColumnRef | undefined> } {
     const refs = resolveSourceColumnsByOrdinal(
       dbType,
       analysis,
@@ -3478,14 +3527,31 @@ export const useQueryStore = defineStore("query", () => {
     return { comments, mapping };
   }
 
+  function mysqlColumnIsGenerated(column: { extra: string | null }): boolean {
+    const extra = column.extra?.trim().toLowerCase() ?? "";
+    return extra.includes("virtual generated") || extra.includes("stored generated");
+  }
+
+  function groupedByExactlyOneSourcePrimaryKey(loaded: LoadedEditableSource, groupByRefs: Array<QueryResultSourceColumnRef | undefined>): boolean {
+    const primaryKeys = loaded.tableMeta.primaryKeys;
+    if (!primaryKeys.length || groupByRefs.length !== primaryKeys.length) return false;
+    const groupedColumns = groupByRefs.flatMap((ref) => (ref?.sourceKey === loaded.source.key ? [ref.sourceColumn] : []));
+    return groupedColumns.length === primaryKeys.length && new Set(groupedColumns).size === primaryKeys.length && primaryKeys.every((primaryKey) => groupedColumns.includes(primaryKey));
+  }
+
   function canInsertIntoEditableQuerySource(tab: QueryTab, databaseType: DatabaseType | undefined, loaded: LoadedEditableSource, sourceColumns: readonly (string | undefined)[] | undefined): boolean {
     if (!canInsertTableRows(databaseType) || !sourceColumns?.length || !sourceColumns.every(Boolean)) return false;
-    const knownTableType =
+    const knownTableType = knownEditableQuerySourceTableType(tab, loaded);
+    return !knownTableType?.toUpperCase().includes("VIEW");
+  }
+
+  function knownEditableQuerySourceTableType(tab: QueryTab, loaded: LoadedEditableSource): string | undefined {
+    return (
       loaded.tableMeta.tableType ??
       useConnectionStore()
         .lookupLocalCompletionTables(tab.connectionId!, loaded.tableMeta.database ?? tab.database, loaded.tableMeta.tableName, 20, loaded.tableMeta.schema, loaded.tableMeta.catalog)
-        .find((table) => table.name.toLowerCase() === loaded.tableMeta.tableName.toLowerCase())?.type;
-    return !knownTableType?.toUpperCase().includes("VIEW");
+        .find((table) => table.name.toLowerCase() === loaded.tableMeta.tableName.toLowerCase())?.type
+    );
   }
 
   interface EditableQueryExecutionPreparation {
@@ -3587,10 +3653,10 @@ export const useQueryStore = defineStore("query", () => {
         tableName: target.request.tableName,
         tableType: loadedColumns.tableType,
         columns: loadedColumns.columns,
-        // Display-only enrichment never resolves row identity (indexes), so
-        // there are no primary keys to carry; resolveMultiSourceColumnInfo only
-        // consumes `source` + `columns`.
-        primaryKeys: [],
+        // MySQL getColumns already marks declared primary-key columns. Keep the
+        // columns-only path free of index discovery while allowing grouped
+        // results to prove that one physical row is uniquely identifiable.
+        primaryKeys: target.request.databaseType === "mysql" && target.request.driverProfile === "mysql" ? loadedColumns.columns.filter((column) => column.is_primary_key).map((column) => column.name) : [],
       },
     };
   }
@@ -3726,15 +3792,12 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   /**
-   * Display-only result-column enrichment for aggregated (GROUP BY / HAVING)
-   * results: parse the SELECT structure, load every source table's metadata,
-   * resolve each result column back to exactly one base-table column by
-   * projection ordinal, and return the resolved comments + display mapping.
-   * Best-effort by design: returns `undefined` when the statement cannot be
-   * structurally parsed or source metadata cannot be loaded — the query result
-   * itself and editability are never affected.
+   * Resolve grouped result columns by projection ordinal. All databases use the
+   * mapping for comments. MySQL may additionally edit direct columns from one
+   * uniquely identifiable base table; aggregate expressions and columns from
+   * every other source remain read-only.
    */
-  async function resolveAggregationDisplayColumnInfo(tab: QueryTab, sql: string, executionDatabase: string, traceId: string | undefined): Promise<{ comments: Array<string | undefined>; mapping: Array<QueryResultSourceColumnRef | undefined> } | undefined> {
+  async function resolveAggregationQueryMetadata(tab: QueryTab, sql: string, executionDatabase: string, traceId: string | undefined): Promise<QueryMetadataPatch | undefined> {
     if (tab.mode !== "query" || !tab.connectionId || !tab.result || !tab.result.columns.length) return undefined;
     const conn = useConnectionStore().getConfig(tab.connectionId);
     const dbType = conn?.db_type || "";
@@ -3763,7 +3826,63 @@ export const useQueryStore = defineStore("query", () => {
           }),
         ),
       );
-      return resolveMultiSourceColumnInfo(dbType, analysis, tab.result.columns, loadedSources);
+      const displayInfo = resolveResultColumnInfo(dbType, analysis, tab.result.columns, loadedSources);
+      const readOnlyPatch: QueryMetadataPatch = {
+        queryAnalysis: undefined,
+        querySourceColumns: undefined,
+        queryEditabilityReason: "aggregation",
+        tableMeta: undefined,
+        resultColumnComments: displayInfo.comments,
+        queryDisplaySourceColumns: displayInfo.mapping,
+      };
+      if (dbType !== "mysql" || (conn?.driver_profile || conn?.db_type) !== "mysql") return readOnlyPatch;
+      // Mutation safety boundary: the FROM root must remain on the preserved
+      // side of the join tree, and GROUP BY must resolve to exactly that table's
+      // declared primary key. This makes every editable result row identify one
+      // physical root row even when joined rows are collapsed by aggregation.
+      if (analysis.distinct || analysis.hasHavingClause || analysis.hasWindowClause || analysis.hasRightJoinClause || !analysis.groupByColumns?.length) return readOnlyPatch;
+
+      const groupByRefs = resolveSourceColumnsByOrdinal(
+        dbType,
+        { ...analysis, selectStar: false, columns: analysis.groupByColumns },
+        loadedSources.map((loaded) => ({ source: loaded.source, columns: loaded.tableMeta.columns })),
+        analysis.groupByColumns.length,
+      );
+
+      const candidates = loadedSources
+        .map((loaded) => {
+          const sourceColumns = displayInfo.mapping.map((ref) => {
+            if (ref?.sourceKey !== loaded.source.key) return undefined;
+            const column = loaded.tableMeta.columns.find((candidate) => candidate.name === ref.sourceColumn);
+            return column && !mysqlColumnIsGenerated(column) ? ref.sourceColumn : undefined;
+          });
+          const primaryKeySet = new Set(loaded.tableMeta.primaryKeys);
+          const hasCompletePrimaryKey = loaded.tableMeta.primaryKeys.length > 0 && loaded.tableMeta.primaryKeys.every((primaryKey) => sourceColumns.includes(primaryKey));
+          const editableSourceColumnCount = sourceColumns.filter((column) => column && !primaryKeySet.has(column)).length;
+          const hasExactPrimaryKeyGrouping = groupedByExactlyOneSourcePrimaryKey(loaded, groupByRefs);
+          return { ...loaded, sourceColumns, isRootSource: loaded.source.key === sources[0]!.key, hasCompletePrimaryKey, hasExactPrimaryKeyGrouping, editableSourceColumnCount };
+        })
+        .filter((loaded) => loaded.isRootSource && loaded.hasCompletePrimaryKey && loaded.hasExactPrimaryKeyGrouping && loaded.editableSourceColumnCount > 0 && !knownEditableQuerySourceTableType(tab, loaded)?.toUpperCase().includes("VIEW"));
+
+      // More than one writable source is ambiguous. Refuse the entire result
+      // instead of guessing which table an edit should mutate.
+      if (candidates.length !== 1) return readOnlyPatch;
+
+      const target = candidates[0]!;
+      return {
+        queryAnalysis: {
+          ...target.analysis,
+          editableSourceKey: target.source.key,
+          allowInsert: false,
+          allowInsertDelete: false,
+          multiSource: sources.length > 1,
+        },
+        querySourceColumns: target.sourceColumns,
+        queryEditabilityReason: undefined,
+        tableMeta: target.tableMeta,
+        resultColumnComments: displayInfo.comments,
+        queryDisplaySourceColumns: displayInfo.mapping,
+      };
     } catch (err) {
       console.error("[DBX] ERROR fetching columns for grouped query metadata:", err);
       return undefined;
@@ -3790,18 +3909,13 @@ export const useQueryStore = defineStore("query", () => {
       elapsed: elapsed?.(),
     });
     if (!editability.editable) {
-      // Grouped (aggregation) results stay read-only, but their directly
-      // projected base-table columns can still be resolved for display metadata
-      // (column comments). This enrichment is display-only — it never enables
-      // row mutation for aggregated results (fixes #6463). Every other
-      // non-editable reason keeps the previous behavior.
-      const displayInfo = editability.reason === "aggregation" ? await resolveAggregationDisplayColumnInfo(tab, sql, executionDatabase, traceId) : undefined;
+      const aggregationPatch = editability.reason === "aggregation" ? await resolveAggregationQueryMetadata(tab, sql, executionDatabase, traceId) : undefined;
+      if (aggregationPatch) return aggregationPatch;
       return {
         queryAnalysis: undefined,
         querySourceColumns: undefined,
         queryEditabilityReason: editability.reason,
         tableMeta: undefined,
-        ...(displayInfo ? { resultColumnComments: displayInfo.comments, queryDisplaySourceColumns: displayInfo.mapping } : {}),
       };
     }
     const analysis = editability.analysis;
@@ -3853,6 +3967,7 @@ export const useQueryStore = defineStore("query", () => {
         const metadataAnalysis = expandStarProjectionColumnsForSource(bindColumnsForSource(dbType, loaded.analysis, loaded.source, loaded.tableMeta.columns, allSourceColumns), loaded.source, loaded.tableMeta.columns);
         const syntheticRowIdProjection = hiddenPrimaryKeys.find((projection) => projection.sourceName.toUpperCase() === DBX_ROWID_COLUMN);
         const primaryKeys = loaded.tableMeta.primaryKeys.length === 0 && syntheticRowIdProjection ? [DBX_ROWID_COLUMN] : loaded.tableMeta.primaryKeys;
+        const keylessResultInfo = primaryKeys.length === 0 ? resolveResultColumnInfo(dbType, analysis, tab.result.columns, loadedSources) : undefined;
         const sourceColumns = sourceColumnsForResult(metadataAnalysis, tab.result.columns, loaded.source.key);
         if (sourceColumns && syntheticRowIdProjection) {
           const resultIndex = tab.result.columns.findIndex((column) => column.toLowerCase() === syntheticRowIdProjection.alias.toLowerCase());
@@ -3864,6 +3979,7 @@ export const useQueryStore = defineStore("query", () => {
             querySourceColumns: undefined,
             queryEditabilityReason: "no-primary-key",
             tableMeta: loaded.tableMeta,
+            resultColumnComments: keylessResultInfo?.comments,
           };
         }
 
@@ -3891,6 +4007,7 @@ export const useQueryStore = defineStore("query", () => {
           querySourceColumns: sourceColumns,
           queryEditabilityReason: undefined,
           tableMeta: primaryKeys === loaded.tableMeta.primaryKeys ? loaded.tableMeta : { ...loaded.tableMeta, primaryKeys },
+          resultColumnComments: keylessResultInfo?.comments,
         };
       }
 
@@ -3898,7 +4015,7 @@ export const useQueryStore = defineStore("query", () => {
       // table's metadata is already loaded. Surface per-ordinal column comments
       // and a display-only result->source mapping so the data grid can still
       // show comments for joined results (fixes #2129 / #6352).
-      const multiSourceInfo = loadedSources.length > 1 ? resolveMultiSourceColumnInfo(dbType, analysis, tab.result.columns, loadedSources) : undefined;
+      const multiSourceInfo = loadedSources.length > 1 ? resolveResultColumnInfo(dbType, analysis, tab.result.columns, loadedSources) : undefined;
 
       if (candidates.length === 0) {
         return {
@@ -6190,6 +6307,7 @@ export const useQueryStore = defineStore("query", () => {
     refreshDataTabsForTable,
     releaseConnectionTabs,
     releaseDatabaseTabs,
+    staleConnectionDataTabMetadata,
     isDatabaseOpen,
     openDatabaseKeys,
     rollbackConnectionTransactions,

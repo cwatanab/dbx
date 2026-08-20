@@ -44,7 +44,7 @@ import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/z
 import { setZooKeeperAuthScheme, zooKeeperAuthScheme as resolveZooKeeperAuthScheme, type ZooKeeperAuthScheme } from "@/lib/zookeeper/zookeeperConnectionOptions";
 import { isLocalFileTypeDb } from "@/lib/connection/connectionFile";
 import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedVersion } from "@/lib/mq/mqPinnedVersionOptions";
-import { mongodbAuthFailureHint, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
+import { mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
@@ -65,7 +65,7 @@ import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, resolveMqKafkaCon
 import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "@/lib/connection/databaseCategoryOptions";
 import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView } from "@/lib/connection/connectionPickerViewPreference";
 import { normalizeRocketmqNamesrvAddr } from "@/lib/connection/rocketmqNamesrv";
-import { normalizeRabbitmqAddresses } from "@/lib/connection/rabbitmqAddresses";
+import { normalizeRabbitmqAddresses, parseRabbitmqAddress } from "@/lib/connection/rabbitmqAddresses";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
@@ -106,10 +106,12 @@ import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, fil
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
+import SpannerConnectionFields from "@/components/connection/SpannerConnectionFields.vue";
 import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/database/oceanbaseConnectionMode";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { applyHiveKerberosSubmitConfig, hiveKerberosFormConfig, type HiveKerberosAuthMode } from "@/lib/database/hiveKerberosOptions";
 import { hasCloudflareD1Credentials, isCloudflareD1Connection, normalizeCloudflareD1Connection } from "@/lib/connection/cloudflareD1";
+import { hasSpannerResourcePath, isSpannerConnection, normalizeSpannerConnection } from "@/lib/connection/spannerResourcePath";
 import {
   buildElasticsearchExternalConfig,
   elasticsearchConnectionModeFromConfig,
@@ -1171,7 +1173,7 @@ const driverProfiles: Record<
   gaussdb: { type: "gaussdb", port: 5432, user: "gaussdb", label: "GaussDB", icon: "gaussdb" },
   kwdb: { type: "kwdb", port: 26257, user: "root", label: "KWDB", icon: "kwdb" },
   questdb: { type: "questdb", port: 8812, user: "questdb", label: "QuestDB", icon: "questdb" },
-  kingbase: { type: "kingbase", port: 54321, user: "system", label: "人大金仓 KingbaseES", icon: "kingbase" },
+  kingbase: { type: "kingbase", port: 54321, user: "system", label: "金仓KingbaseES", icon: "kingbase" },
   highgo: { type: "highgo", port: 5866, user: "highgo", label: "瀚高 HighGo", icon: "highgo" },
   uxdb: { type: "uxdb", port: 52025, user: "uxdb", label: "优炫 UXDB", icon: "uxdb" },
   yashandb: { type: "yashandb", port: 1688, user: "sys", label: "崖山 YashanDB", icon: "yashandb" },
@@ -1233,7 +1235,10 @@ const driverProfiles: Record<
     icon: "bigquery",
     host: "https://www.googleapis.com/bigquery/v2",
   },
+  spanner: { type: "spanner", port: 443, user: "", label: "Cloud Spanner", icon: "spanner" },
   kylin: { type: "kylin", port: 7070, user: "ADMIN", label: "Apache Kylin", icon: "kylin" },
+  ignite: { type: "ignite", port: 10800, user: "", label: "Apache Ignite", icon: "ignite" },
+  ignite3: { type: "ignite3", port: 10800, user: "", label: "Apache Ignite 3", icon: "ignite" },
   sundb: { type: "sundb", port: 22000, user: "root", label: "科蓝 SUNDB", icon: "sundb" },
   oscar: { type: "oscar", port: 2003, user: "SYSDBA", label: "神通 OSCAR", icon: "oscar" },
   jdbc: { type: "jdbc", port: 0, user: "", label: "JDBC", icon: "jdbc" },
@@ -1742,7 +1747,12 @@ function buildMqAdminConfig(): MqAdminConfig {
   }
 
   if (systemKind === "rabbitmq") {
-    const addresses = normalizeRabbitmqAddresses(mqRabbitmqAddresses.value);
+    let addresses: string;
+    try {
+      addresses = normalizeRabbitmqAddresses(mqRabbitmqAddresses.value);
+    } catch {
+      throw new Error(t(mqRabbitmqAddresses.value.trim() ? "connection.mqRabbitmqAddressesInvalid" : "connection.mqRabbitmqAddressesRequired"));
+    }
     const extra: Record<string, unknown> = {
       addresses,
       virtualHost: mqRabbitmqVirtualHost.value.trim() || "/",
@@ -2285,14 +2295,9 @@ function applyMqKafkaConnectionTarget(config: LegacyConnectionConfig, extra: Rec
 function applyMqRabbitmqAddresses(config: LegacyConnectionConfig, addresses: string) {
   const first = normalizeRabbitmqAddresses(addresses).split(",")[0];
   if (!first) throw new Error(t("connection.mqRabbitmqAddressesRequired"));
-  let parsed: URL;
-  try {
-    parsed = new URL(`amqp://${first}`);
-  } catch {
-    throw new Error(t("connection.mqRabbitmqAddressesInvalid"));
-  }
-  config.host = parsed.hostname;
-  config.port = Number(parsed.port) || 5672;
+  const parsed = parseRabbitmqAddress(first);
+  config.host = parsed.host;
+  config.port = parsed.port;
   config.ssl = false;
 }
 
@@ -2517,6 +2522,15 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.jdbc_driver_paths = [];
       jdbcDriverPathsInput.value = "";
       jdbcManualClasspathOpen.value = true;
+    }
+    if (profile.type === "spanner") {
+      // Google Cloud endpoints carry no host; the local emulator is opted into
+      // by typing host `localhost` and port 9010 explicitly.
+      form.value.host = "";
+      form.value.username = "";
+      form.value.password = "";
+      form.value.database = undefined;
+      form.value.connection_string = undefined;
     }
     if (profile.type === "mq") {
       resetMqFields(defaultMqFieldsForProfile(val));
@@ -2972,7 +2986,10 @@ const iconTypeMap: Record<string, string> = {
   neo4j: "neo4j",
   cassandra: "cassandra",
   bigquery: "bigquery",
+  spanner: "spanner",
   kylin: "kylin",
+  ignite: "ignite",
+  ignite3: "ignite",
   sundb: "sundb",
   oscar: "oscar",
   influxdb: "influxdb",
@@ -3033,7 +3050,7 @@ const dbOptions: DbOption[] = [
   { value: "firebird", label: "Firebird" },
   { value: "exasol", label: "Exasol" },
   { value: "gbase", label: "南大通用 GBase" },
-  { value: "kingbase", label: "人大金仓 KingbaseES" },
+  { value: "kingbase", label: "金仓KingbaseES" },
   { value: "highgo", label: "瀚高 HighGo" },
   { value: "uxdb", label: "优炫 UXDB" },
   { value: "yashandb", label: "崖山 YashanDB" },
@@ -3053,7 +3070,10 @@ const dbOptions: DbOption[] = [
   { value: "neo4j", label: "Neo4j" },
   { value: "cassandra", label: "Cassandra" },
   { value: "bigquery", label: "BigQuery" },
+  { value: "spanner", label: "Cloud Spanner" },
   { value: "kylin", label: "Kylin" },
+  { value: "ignite", label: "Apache Ignite" },
+  { value: "ignite3", label: "Apache Ignite 3" },
   { value: "sundb", label: "科蓝 SUNDB" },
   { value: "oscar", label: "神通 OSCAR" },
   { value: "xugu", label: "虚谷 XuguDB" },
@@ -3087,12 +3107,12 @@ const dbCategoryDefinitions: Array<{
   {
     key: "sql",
     titleKey: "connection.databaseCategorySql",
-    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "jdbcx", "custom_mysql", "custom_postgres", "dolt"],
+    optionValues: ["postgres", "mysql", "oracle", "sqlserver", "mariadb", "cockroachdb", "db2", "informix", "firebird", "iris", "spanner", "jdbcx", "custom_mysql", "custom_postgres", "dolt"],
   },
   {
     key: "analytics",
     titleKey: "connection.databaseCategoryAnalytics",
-    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "kyuubi", "impala", "spark", "bigquery", "kylin", "dremio"],
+    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "kyuubi", "impala", "spark", "bigquery", "kylin", "ignite", "ignite3", "dremio"],
   },
   {
     key: "domestic",
@@ -3611,6 +3631,8 @@ const hasRequiredConnectionTarget = computed(() => {
   if (form.value.db_type === "nacos") return !!nacosServerAddr.value.trim();
   if (form.value.db_type === "consul") return !!consulServerAddr.value.trim();
   if (isCloudflareD1Connection(form.value)) return hasCloudflareD1Credentials(form.value);
+  // Cloud Spanner has no host to fall back on: the resource path is the target.
+  if (isSpannerConnection(form.value)) return hasSpannerResourcePath(form.value);
   if (isH2FileMode.value) return !!(form.value.host.trim() || h2FilePathFromJdbcUrl(form.value.connection_string));
   return !!(form.value.host || (mongoUseUrl.value && form.value.connection_string) || (form.value.db_type === "jdbc" && form.value.connection_string) || connectionUrlInput.value.trim());
 });
@@ -3623,9 +3645,19 @@ const mongoAuthDatabase = computed({
 const mongoAuthMechanism = computed({
   get: () => mongoUrlParam(form.value.url_params, "authMechanism") || "default",
   set: (value: string) => {
-    form.value.url_params = setMongoUrlParam(form.value.url_params, "authMechanism", value === "default" ? "" : value);
+    const previous = mongoUrlParam(form.value.url_params, "authMechanism");
+    let next = setMongoUrlParam(form.value.url_params, "authMechanism", value === "default" ? "" : value);
+    if (value === "MONGODB-OIDC") {
+      form.value.password = "";
+      mongoDriverMode.value = "auto";
+      next = setMongoUrlParam(next, "authSource", "$external");
+    } else if (previous === "MONGODB-OIDC" && mongoUrlParam(next, "authSource") === "$external") {
+      next = setMongoUrlParam(next, "authSource", "");
+    }
+    form.value.url_params = next;
   },
 });
+const mongoUsesOidc = computed(() => mongoConnectionUsesOidc(mongoUseUrl.value ? undefined : form.value.url_params, mongoUseUrl.value ? form.value.connection_string : undefined));
 const mongoTlsAllowInvalidCertificates = computed({
   get: () => mongoUrlParamIsTrue(form.value.url_params, "tlsAllowInvalidCertificates"),
   set: (value: boolean) => {
@@ -3940,6 +3972,12 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
       throw new Error(t("connection.d1FieldsRequired"));
     }
   }
+  if (isSpannerConnection(config)) {
+    normalizeSpannerConnection(config);
+    if (!hasSpannerResourcePath(config)) {
+      throw new Error(t("connection.spannerFieldsRequired"));
+    }
+  }
   config.transport_layers = (config.transport_layers || []).map(normalizeTransportLayer);
   config.transport_layers = config.transport_layers.map((layer) => {
     if (layer.type !== "ssh") return layer;
@@ -4108,9 +4146,11 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);
     const targetServerType = gaussdbTargetServerType(config);
+    const countQueryDop = gaussdbCountQueryDop(config);
     config.external_config = undefined;
     setGaussdbIdentifierQuoteStyle(config, style);
     setGaussdbTargetServerType(config, targetServerType);
+    setGaussdbCountQueryDop(config, countQueryDop);
   } else if (!isDoltDriverProfile(config.driver_profile)) {
     config.external_config = undefined;
   }
@@ -4120,7 +4160,12 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.connection_string = normalizeMongoConnectionString(config.connection_string?.trim() || "");
   }
   if (config.db_type === "mongodb") {
-    if (isMongoLegacyDriverProfile(config.driver_profile)) {
+    const usesOidc = mongoConnectionUsesOidc(mongoUseUrl.value ? undefined : config.url_params, mongoUseUrl.value ? config.connection_string : undefined);
+    if (usesOidc) {
+      config.password = "";
+      config.driver_profile = "mongodb";
+      config.driver_label = "MongoDB";
+    } else if (isMongoLegacyDriverProfile(config.driver_profile)) {
       config.driver_profile = "mongodb-legacy";
       config.driver_label = "MongoDB (Legacy)";
     } else {
@@ -6833,7 +6878,7 @@ function openExternalUrl(url: string) {
                     <Label :class="connectionLabelSmallClass">{{ t("connection.driverMode") }}</Label>
                     <div class="col-span-3 flex items-center gap-2">
                       <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'outline' : 'default'" @click="mongoDriverMode = 'auto'">{{ t("connection.mongoDriverAuto") }}</Button>
-                      <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'default' : 'outline'" @click="mongoDriverMode = 'legacy'">{{ t("connection.mongoDriverLegacy") }}</Button>
+                      <Button size="sm" :variant="mongoDriverMode === 'legacy' ? 'default' : 'outline'" :disabled="mongoUsesOidc" @click="mongoDriverMode = 'legacy'">{{ t("connection.mongoDriverLegacy") }}</Button>
                       <Tooltip>
                         <TooltipTrigger as-child>
                           <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
@@ -6859,6 +6904,9 @@ function openExternalUrl(url: string) {
                         class="col-span-3 flex min-h-[80px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                         placeholder="mongodb+srv://user:pass@cluster.mongodb.net/mydb"
                       />
+                      <p v-if="mongoUsesOidc" class="col-start-2 col-span-3 text-xs text-muted-foreground">
+                        {{ t("connection.oidcBrowserAuthHint") }}
+                      </p>
                     </div>
                   </template>
                   <template v-else>
@@ -6912,7 +6960,7 @@ function openExternalUrl(url: string) {
                       <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                       <Input v-model="form.username" class="col-span-3" />
                     </div>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="mongoAuthMechanism !== 'MONGODB-OIDC'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.password") }}</Label>
                       <PasswordInput v-model="form.password" class="col-span-3" />
                     </div>
@@ -6922,7 +6970,7 @@ function openExternalUrl(url: string) {
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.authDatabase") }}</Label>
-                      <Input v-model="mongoAuthDatabase" class="col-span-3" :placeholder="t('connection.authDatabasePlaceholder')" />
+                      <Input v-model="mongoAuthDatabase" class="col-span-3" :disabled="mongoAuthMechanism === 'MONGODB-OIDC'" :placeholder="mongoAuthMechanism === 'MONGODB-OIDC' ? '$external' : t('connection.authDatabasePlaceholder')" />
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.authMechanism") }}</Label>
@@ -6934,8 +6982,15 @@ function openExternalUrl(url: string) {
                           <SelectItem value="default">{{ t("connection.authMechanismDefault") }}</SelectItem>
                           <SelectItem value="SCRAM-SHA-1">SCRAM-SHA-1</SelectItem>
                           <SelectItem value="SCRAM-SHA-256">SCRAM-SHA-256</SelectItem>
+                          <SelectItem value="MONGODB-OIDC">MONGODB-OIDC</SelectItem>
                         </SelectContent>
                       </Select>
+                    </div>
+                    <div v-if="mongoAuthMechanism === 'MONGODB-OIDC'" class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 text-xs text-muted-foreground">
+                        {{ t("connection.oidcBrowserAuthHint") }}
+                      </p>
                     </div>
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
@@ -7277,17 +7332,17 @@ function openExternalUrl(url: string) {
                     <Input v-model="form.informix_server" class="col-span-3" placeholder="ol_informix1170" />
                   </div>
 
-                  <div v-if="form.db_type !== 'meilisearch'" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'meilisearch' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.user") }}</Label>
                     <Input v-model="form.username" class="col-span-3" />
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ form.db_type === "meilisearch" ? t("connection.mqAuthApiKey") : t("connection.password") }}</Label>
                     <PasswordInput v-model="form.password" class="col-span-3" />
                   </div>
 
-                  <div class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                     <span />
                     <div class="col-span-3 flex items-center gap-1.5 text-sm">
                       <label class="flex items-center gap-2">
@@ -7300,10 +7355,19 @@ function openExternalUrl(url: string) {
                     </div>
                   </div>
 
-                  <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch'" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'spanner'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ databaseLabel }}</Label>
                     <Input v-model="form.database" class="col-span-3" :placeholder="databasePlaceholder" />
                   </div>
+
+                  <!-- Cloud Spanner: project/instance/database resource path instead of user/password/database -->
+                  <template v-if="form.db_type === 'spanner'">
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.spannerHostHint") }}</p>
+                    </div>
+                    <SpannerConnectionFields v-model:database="form.database" @change="resetTestState" />
+                  </template>
 
                   <div v-if="form.db_type === 'oracle' && form.oracle_connection_type === 'tns'" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">TNS_ADMIN</Label>
@@ -7460,13 +7524,15 @@ function openExternalUrl(url: string) {
                                   ? 'secure=true'
                                   : form.db_type === 'bigquery'
                                     ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
-                                    : form.db_type === 'informix'
-                                      ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                      : form.db_type === 'spark'
-                                        ? 'catalog=paimon_catalog'
-                                        : form.db_type === 'cassandra'
-                                          ? 'localdatacenter=dc1'
-                                          : 'sslmode=prefer'
+                                    : form.db_type === 'spanner'
+                                      ? 'credentials=/path/key.json;autocommit=true'
+                                      : form.db_type === 'informix'
+                                        ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
+                                        : form.db_type === 'spark'
+                                          ? 'catalog=paimon_catalog'
+                                          : form.db_type === 'cassandra'
+                                            ? 'localdatacenter=dc1'
+                                            : 'sslmode=prefer'
                         "
                       />
                       <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">
@@ -8149,14 +8215,9 @@ function openExternalUrl(url: string) {
                       <input id="connect-timeout-global" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
                       <div class="flex min-w-0 flex-1 items-center gap-1">
                         <label for="connect-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                        <Tooltip>
-                          <TooltipTrigger as-child>
-                            <CircleHelp class="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground hover:text-foreground" />
-                          </TooltipTrigger>
-                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
-                            {{ t("connection.globalConnectTimeoutHint") }}
-                          </TooltipContent>
-                        </Tooltip>
+                        <HelpTooltip :label="t('connection.globalConnectTimeoutHint')" content-class="max-w-[280px]">
+                          {{ t("connection.globalConnectTimeoutHint") }}
+                        </HelpTooltip>
                       </div>
                       <Input
                         v-model.number="editGlobalConnectTimeoutSecs"
@@ -8199,14 +8260,9 @@ function openExternalUrl(url: string) {
                       <input id="query-timeout-global" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
                       <div class="flex min-w-0 flex-1 items-center gap-1">
                         <label for="query-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
-                        <Tooltip>
-                          <TooltipTrigger as-child>
-                            <CircleHelp class="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground hover:text-foreground" />
-                          </TooltipTrigger>
-                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
-                            {{ t("connection.globalQueryTimeoutHint") }}
-                          </TooltipContent>
-                        </Tooltip>
+                        <HelpTooltip :label="t('connection.globalQueryTimeoutHint')" content-class="max-w-[280px]">
+                          {{ t("connection.globalQueryTimeoutHint") }}
+                        </HelpTooltip>
                       </div>
                       <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit !== true" @input="clampQueryTimeoutInput($event, 'global')" />
                     </div>
