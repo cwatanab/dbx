@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime};
 use deadpool_postgres::{ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime};
 use futures::{SinkExt, StreamExt};
+use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
 use percent_encoding::percent_decode_str;
 use rust_decimal::Decimal;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -2117,17 +2118,27 @@ async fn connect_postgres_pool_attempt(
         // executor's ReconnectAndRetry path (see pool_error_action / do_execute
         // in query.rs).
         let mgr_config = ManagerConfig { recycling_method: RecyclingMethod::Fast };
-        let tls_config = postgres_tls_config(
-            &pg_config,
-            &postgres_url.ssl_files,
-            postgres_url.accepts_invalid_certs,
-            postgres_url.verifies_hostname,
-        )?;
-        let mgr = deadpool_postgres::Manager::from_connect(
-            pg_config.clone(),
-            NoticeCapturingConnect { tls: tokio_postgres_rustls::MakeRustlsConnect::new(tls_config) },
-            mgr_config,
-        );
+        let mgr = if postgres_url.legacy_tls {
+            log::info!("PostgreSQL legacy TLS compatibility enabled");
+            let tls = postgres_openssl_connector(
+                &postgres_url.ssl_files,
+                postgres_url.accepts_invalid_certs,
+                postgres_url.verifies_hostname,
+            )?;
+            deadpool_postgres::Manager::from_connect(pg_config.clone(), NoticeCapturingConnect { tls }, mgr_config)
+        } else {
+            let tls_config = postgres_tls_config(
+                &pg_config,
+                &postgres_url.ssl_files,
+                postgres_url.accepts_invalid_certs,
+                postgres_url.verifies_hostname,
+            )?;
+            deadpool_postgres::Manager::from_connect(
+                pg_config.clone(),
+                NoticeCapturingConnect { tls: tokio_postgres_rustls::MakeRustlsConnect::new(tls_config) },
+                mgr_config,
+            )
+        };
         let pool = Pool::builder(mgr)
             .max_size(10)
             .runtime(Runtime::Tokio1)
@@ -2264,6 +2275,7 @@ pub struct PostgresCancelContext {
     pub accepts_invalid_certs: bool,
     pub verifies_hostname: bool,
     pub ssl_mode: SslMode,
+    pub legacy_tls: bool,
 }
 
 /// Build a TLS cancel context from the connection URL.
@@ -2279,6 +2291,7 @@ pub fn build_postgres_cancel_context(url: &str) -> Option<PostgresCancelContext>
         accepts_invalid_certs: postgres_url.accepts_invalid_certs,
         verifies_hostname: postgres_url.verifies_hostname,
         ssl_mode: pg_config.get_ssl_mode(),
+        legacy_tls: postgres_url.legacy_tls,
     })
 }
 
@@ -2293,12 +2306,19 @@ fn make_rustls_connect_from_context(
     Ok(tokio_postgres_rustls::MakeRustlsConnect::new(tls_config))
 }
 
+fn make_openssl_connect_from_context(
+    ctx: &PostgresCancelContext,
+) -> Result<postgres_openssl::MakeTlsConnector, String> {
+    postgres_openssl_connector(&ctx.ssl_files, ctx.accepts_invalid_certs, ctx.verifies_hostname)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PostgresConnectionUrl {
     url: String,
     ssl_files: PostgresSslFiles,
     accepts_invalid_certs: bool,
     verifies_hostname: bool,
+    legacy_tls: bool,
 }
 
 /// Inject TCP keepalive parameters into the PostgreSQL URL (only when the user has not explicitly specified them).
@@ -2331,6 +2351,7 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
             ssl_files: PostgresSslFiles::default(),
             accepts_invalid_certs: postgres_sslmode_accepts_invalid_certs(pg_config.get_ssl_mode()),
             verifies_hostname: false,
+            legacy_tls: false,
         });
     };
 
@@ -2341,6 +2362,7 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
     let mut kept_params = Vec::new();
     let mut accepts_invalid_certs = true;
     let mut verifies_hostname = false;
+    let mut legacy_tls = false;
 
     for param in query_string.split('&') {
         if param.is_empty() {
@@ -2352,7 +2374,9 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
             continue;
         };
 
-        if key.eq_ignore_ascii_case("sslcert")
+        if key.eq_ignore_ascii_case("legacy_tls") {
+            legacy_tls = matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+        } else if key.eq_ignore_ascii_case("sslcert")
             || key.eq_ignore_ascii_case("sslkey")
             || key.eq_ignore_ascii_case("sslrootcert")
         {
@@ -2414,7 +2438,49 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
         sanitized_url.push_str(fragment);
     }
 
-    Ok(PostgresConnectionUrl { url: sanitized_url, ssl_files, accepts_invalid_certs, verifies_hostname })
+    Ok(PostgresConnectionUrl { url: sanitized_url, ssl_files, accepts_invalid_certs, verifies_hostname, legacy_tls })
+}
+
+fn postgres_openssl_connector(
+    ssl_files: &PostgresSslFiles,
+    accepts_invalid_certs: bool,
+    verifies_hostname: bool,
+) -> Result<postgres_openssl::MakeTlsConnector, String> {
+    let mut builder = SslConnector::builder(SslMethod::tls_client())
+        .map_err(|e| format!("Failed to initialize PostgreSQL legacy TLS: {e}"))?;
+
+    if accepts_invalid_certs {
+        builder.set_verify(SslVerifyMode::NONE);
+    } else {
+        builder.set_verify(SslVerifyMode::PEER);
+        if let Some(path) = ssl_files.sslrootcert.as_deref() {
+            builder
+                .set_ca_file(path)
+                .map_err(|e| format!("sslrootcert: failed to load CA certificate from {path}: {e}"))?;
+        }
+    }
+
+    match (ssl_files.sslcert.as_deref(), ssl_files.sslkey.as_deref()) {
+        (Some(cert_path), Some(key_path)) => {
+            builder
+                .set_certificate_chain_file(cert_path)
+                .map_err(|e| format!("sslcert: failed to load certificate from {cert_path}: {e}"))?;
+            builder
+                .set_private_key_file(key_path, SslFiletype::PEM)
+                .map_err(|e| format!("sslkey: failed to load private key from {key_path}: {e}"))?;
+            builder.check_private_key().map_err(|e| format!("sslkey: private key does not match sslcert: {e}"))?;
+        }
+        (Some(_), None) => return Err("PostgreSQL sslcert requires sslkey".to_string()),
+        (None, Some(_)) => return Err("PostgreSQL sslkey requires sslcert".to_string()),
+        (None, None) => {}
+    }
+
+    let mut connector = postgres_openssl::MakeTlsConnector::new(builder.build());
+    connector.set_callback(move |config, _| {
+        config.set_verify_hostname(verifies_hostname);
+        Ok(())
+    });
+    Ok(connector)
 }
 
 fn postgres_tls_config(
@@ -5216,6 +5282,8 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
                               FROM pg_enum e WHERE e.enumtypid = enum_t.oid), '[]') END AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
+             JOIN pg_class relation_class ON relation_class.oid = a.attrelid \
+             JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace \
              LEFT JOIN pg_type enum_t ON enum_t.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typtype = 'e' THEN t.oid ELSE NULL END AND enum_t.typtype = 'e' \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN LATERAL ( \
@@ -5241,8 +5309,8 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
              ) dep ON TRUE \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
              LEFT JOIN information_schema.columns c \
-               ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname \
-             WHERE a.attrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass \
+               ON c.table_schema = relation_namespace.nspname AND c.table_name = relation_class.relname AND c.column_name = a.attname \
+             WHERE a.attrelid = (CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -5275,6 +5343,8 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
              NULL::text AS enum_values \
              FROM pg_attribute a \
              JOIN pg_type t ON t.oid = a.atttypid \
+             JOIN pg_class relation_class ON relation_class.oid = a.attrelid \
+             JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace \
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              LEFT JOIN pg_catalog.pg_class serial_seq ON serial_seq.oid = ( \
                SELECT sequence_dep.objid \
@@ -5297,8 +5367,8 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
                LIMIT 1 \
              ) AND serial_seq.relkind = 'S' \
              LEFT JOIN information_schema.columns c \
-               ON c.table_schema = $1 AND c.table_name = $2 AND c.column_name = a.attname \
-             WHERE a.attrelid = (quote_ident($1) || '.' || quote_ident($2))::regclass \
+               ON c.table_schema = relation_namespace.nspname AND c.table_name = relation_class.relname AND c.column_name = a.attname \
+             WHERE a.attrelid = (CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -5425,7 +5495,6 @@ async fn get_columns_with_sql(
 }
 
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
-    let schema = if schema.is_empty() { "public" } else { schema };
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let tiers = [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL, POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL];
     query_with_compat_fallback("get_columns", &tiers, |sql| get_columns_with_sql(&client, sql, schema, table)).await
@@ -6334,8 +6403,25 @@ async fn cancel_postgres_query(
 ) {
     let cancel_timeout = postgres_cancel_attempt_timeout(cancel_timeout, cancel_context);
     if let Some(ctx) = cancel_context {
-        match make_rustls_connect_from_context(ctx) {
-            Ok(tls) => match tokio::time::timeout(cancel_timeout, pg_cancel_token.cancel_query(tls)).await {
+        let tls_result = if ctx.legacy_tls {
+            match make_openssl_connect_from_context(ctx) {
+                Ok(tls) => Some(tokio::time::timeout(cancel_timeout, pg_cancel_token.cancel_query(tls)).await),
+                Err(err) => {
+                    log::warn!("Failed to build legacy TLS connector for cancel: {err}; falling back to NoTls cancel");
+                    None
+                }
+            }
+        } else {
+            match make_rustls_connect_from_context(ctx) {
+                Ok(tls) => Some(tokio::time::timeout(cancel_timeout, pg_cancel_token.cancel_query(tls)).await),
+                Err(err) => {
+                    log::warn!("Failed to build TLS connector for cancel: {err}; falling back to NoTls cancel");
+                    None
+                }
+            }
+        };
+        if let Some(result) = tls_result {
+            match result {
                 Ok(Ok(())) => return,
                 Ok(Err(err)) => {
                     log::warn!("Failed to send PostgreSQL TLS cancel request: {err}");
@@ -6349,9 +6435,6 @@ async fn cancel_postgres_query(
                         return;
                     }
                 }
-            },
-            Err(err) => {
-                log::warn!("Failed to build TLS connector for cancel: {err}; falling back to NoTls cancel");
             }
         }
     }
@@ -6449,7 +6532,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_am am ON am.oid = i.relam \
              JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON true \
              LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
-             WHERE n.nspname = $1 AND t.relname = $2 \
+             WHERE t.oid = (CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
              ORDER BY i.relname";
 
@@ -6486,7 +6569,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_am am ON am.oid = i.relam \
-             WHERE n.nspname = $1 AND t.relname = $2 \
+             WHERE t.oid = (CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              ORDER BY i.relname";
 
 const POSTGRES_OWNERS_SQL: &str =
@@ -7228,7 +7311,16 @@ pub async fn copy_in(pool: &Pool, sql: &str, data: &[u8]) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openssl::asn1::Asn1Time;
+    use openssl::bn::{BigNum, MsbOption};
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+    use openssl::ssl::{Ssl, SslAcceptor, SslMethod, SslVersion};
+    use openssl::x509::extension::{BasicConstraints, KeyUsage, SubjectAlternativeName};
+    use openssl::x509::{X509NameBuilder, X509};
     use std::cell::Cell;
+    use std::pin::Pin;
     use std::process::Command;
     use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7280,6 +7372,125 @@ mod tests {
         plain_socket.write_all(&postgres_error_response("identity probe unavailable")).await.unwrap();
     }
 
+    fn tls12_rsa_certificate_acceptor(cipher_list: &str) -> (SslAcceptor, Vec<u8>) {
+        let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", "localhost").unwrap();
+        let name = name.build();
+
+        let mut serial = BigNum::new().unwrap();
+        serial.rand(64, MsbOption::MAYBE_ZERO, false).unwrap();
+        let serial = serial.to_asn1_integer().unwrap();
+        let mut certificate = X509::builder().unwrap();
+        certificate.set_version(2).unwrap();
+        certificate.set_serial_number(&serial).unwrap();
+        certificate.set_subject_name(&name).unwrap();
+        certificate.set_issuer_name(&name).unwrap();
+        certificate.set_pubkey(&key).unwrap();
+        certificate.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref()).unwrap();
+        certificate.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref()).unwrap();
+        certificate.append_extension(BasicConstraints::new().critical().ca().build().unwrap()).unwrap();
+        certificate
+            .append_extension(KeyUsage::new().digital_signature().key_encipherment().key_cert_sign().build().unwrap())
+            .unwrap();
+        let subject_alt_name =
+            SubjectAlternativeName::new().dns("localhost").build(&certificate.x509v3_context(None, None)).unwrap();
+        certificate.append_extension(subject_alt_name).unwrap();
+        certificate.sign(&key, MessageDigest::sha256()).unwrap();
+        let certificate = certificate.build();
+        let certificate_pem = certificate.to_pem().unwrap();
+
+        let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls_server()).unwrap();
+        acceptor.set_min_proto_version(Some(SslVersion::TLS1_2)).unwrap();
+        acceptor.set_max_proto_version(Some(SslVersion::TLS1_2)).unwrap();
+        acceptor.set_cipher_list(cipher_list).unwrap();
+        acceptor.set_private_key(&key).unwrap();
+        acceptor.set_certificate(&certificate).unwrap();
+        acceptor.check_private_key().unwrap();
+        (acceptor.build(), certificate_pem)
+    }
+
+    async fn accept_tls12_with_acceptor(
+        mut socket: tokio::net::TcpStream,
+        acceptor: &SslAcceptor,
+    ) -> Result<tokio_openssl::SslStream<tokio::net::TcpStream>, openssl::ssl::Error> {
+        let mut ssl_request = [0_u8; 8];
+        socket.read_exact(&mut ssl_request).await.unwrap();
+        assert_eq!(ssl_request, [0, 0, 0, 8, 4, 210, 22, 47]);
+        socket.write_all(b"S").await.unwrap();
+
+        let ssl = Ssl::new(acceptor.context()).unwrap();
+        let mut tls_socket = tokio_openssl::SslStream::new(ssl, socket).unwrap();
+        Pin::new(&mut tls_socket).accept().await?;
+        Ok(tls_socket)
+    }
+
+    async fn accept_tls12(
+        socket: tokio::net::TcpStream,
+        cipher_list: &str,
+    ) -> Result<tokio_openssl::SslStream<tokio::net::TcpStream>, openssl::ssl::Error> {
+        let (acceptor, _) = tls12_rsa_certificate_acceptor(cipher_list);
+        accept_tls12_with_acceptor(socket, &acceptor).await
+    }
+
+    async fn authenticate_tls12_postgres(tls_socket: &mut tokio_openssl::SslStream<tokio::net::TcpStream>) {
+        let startup_len = tls_socket.read_u32().await.unwrap();
+        assert!(startup_len >= 8);
+        let mut startup = vec![0_u8; startup_len as usize - 4];
+        tls_socket.read_exact(&mut startup).await.unwrap();
+        assert_eq!(&startup[..4], &[0, 3, 0, 0]);
+        tls_socket
+            .write_all(&[
+                b'R', 0, 0, 0, 8, 0, 0, 0, 0, // AuthenticationOk
+                b'K', 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 2, // BackendKeyData
+                b'Z', 0, 0, 0, 5, b'I', // ReadyForQuery
+            ])
+            .await
+            .unwrap();
+
+        let mut request = [0_u8; 1024];
+        let read = tls_socket.read(&mut request).await.unwrap();
+        assert!(read > 0, "client should issue the best-effort identity query");
+        tls_socket.write_all(&postgres_error_response("identity probe unavailable")).await.unwrap();
+    }
+
+    async fn serve_tls12_postgres(listener: TcpListener, cipher_list: &'static str, expect_handshake: bool) {
+        let (socket, _) = listener.accept().await.unwrap();
+        let handshake = accept_tls12(socket, cipher_list).await;
+        if !expect_handshake {
+            assert!(handshake.is_err(), "rustls unexpectedly negotiated a static RSA cipher suite");
+            return;
+        }
+        let mut tls_socket = handshake.unwrap();
+        authenticate_tls12_postgres(&mut tls_socket).await;
+    }
+
+    async fn serve_tls12_postgres_with_acceptor(listener: TcpListener, acceptor: SslAcceptor, expect_handshake: bool) {
+        let (socket, _) = listener.accept().await.unwrap();
+        let handshake = accept_tls12_with_acceptor(socket, &acceptor).await;
+        if !expect_handshake {
+            assert!(handshake.is_err(), "TLS handshake unexpectedly succeeded");
+            return;
+        }
+        let mut tls_socket = handshake.unwrap();
+        authenticate_tls12_postgres(&mut tls_socket).await;
+    }
+
+    async fn serve_static_rsa_postgres_with_cancel(listener: TcpListener) {
+        let (main_socket, _) = listener.accept().await.unwrap();
+        let mut main_tls = accept_tls12(main_socket, "AES128-GCM-SHA256").await.unwrap();
+        authenticate_tls12_postgres(&mut main_tls).await;
+
+        let (cancel_socket, _) = listener.accept().await.unwrap();
+        let mut cancel_tls = accept_tls12(cancel_socket, "AES128-GCM-SHA256").await.unwrap();
+        let mut cancel_request = [0_u8; 16];
+        cancel_tls.read_exact(&mut cancel_request).await.unwrap();
+        assert_eq!(u32::from_be_bytes(cancel_request[0..4].try_into().unwrap()), 16);
+        assert_eq!(u32::from_be_bytes(cancel_request[4..8].try_into().unwrap()), 80_877_102);
+        assert_eq!(u32::from_be_bytes(cancel_request[8..12].try_into().unwrap()), 1);
+        assert_eq!(u32::from_be_bytes(cancel_request[12..16].try_into().unwrap()), 2);
+    }
+
     #[tokio::test]
     async fn postgres_prefer_retries_plaintext_after_tls_handshake_failure() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7289,6 +7500,104 @@ mod tests {
 
         let result = connect_with_optional_local_timezone(&url, Duration::from_secs(2), None).await;
         assert!(result.is_ok(), "prefer mode should retry without TLS: {result:?}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn postgres_default_tls_rejects_static_rsa_key_exchange() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(serve_tls12_postgres(listener, "AES128-GCM-SHA256", false));
+        let url = format!("postgres://postgres@127.0.0.1:{port}/postgres?sslmode=require");
+
+        let error = connect_with_optional_local_timezone(&url, Duration::from_secs(2), None)
+            .await
+            .expect_err("rustls must not negotiate static RSA key exchange");
+        assert!(error.to_ascii_lowercase().contains("tls"), "{error}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn postgres_legacy_tls_connects_with_static_rsa_key_exchange() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(serve_tls12_postgres(listener, "AES128-GCM-SHA256", true));
+        let url = format!("postgres://postgres@127.0.0.1:{port}/postgres?sslmode=require&legacy_tls=true");
+
+        let result = connect_with_optional_local_timezone(&url, Duration::from_secs(2), None).await;
+        assert!(result.is_ok(), "legacy TLS should negotiate static RSA: {result:?}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn postgres_legacy_tls_verify_ca_uses_configured_root_without_hostname_check() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (acceptor, certificate_pem) = tls12_rsa_certificate_acceptor("AES128-GCM-SHA256");
+        let root_dir = tempfile::tempdir().unwrap();
+        let root_path = root_dir.path().join("root.pem");
+        std::fs::write(&root_path, certificate_pem).unwrap();
+        let root_path_text = root_path.to_string_lossy();
+        let encoded_root =
+            percent_encoding::utf8_percent_encode(root_path_text.as_ref(), percent_encoding::NON_ALPHANUMERIC);
+        let server = tokio::spawn(serve_tls12_postgres_with_acceptor(listener, acceptor, true));
+        let url = format!(
+            "postgres://postgres@127.0.0.1:{port}/postgres?sslmode=verify-ca&legacy_tls=true&sslrootcert={encoded_root}"
+        );
+
+        let result = connect_with_optional_local_timezone(&url, Duration::from_secs(2), None).await;
+        assert!(result.is_ok(), "verify-ca should trust the configured root without checking the host: {result:?}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn postgres_legacy_tls_verify_full_rejects_hostname_mismatch() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (acceptor, certificate_pem) = tls12_rsa_certificate_acceptor("AES128-GCM-SHA256");
+        let root_dir = tempfile::tempdir().unwrap();
+        let root_path = root_dir.path().join("root.pem");
+        std::fs::write(&root_path, certificate_pem).unwrap();
+        let root_path_text = root_path.to_string_lossy();
+        let encoded_root =
+            percent_encoding::utf8_percent_encode(root_path_text.as_ref(), percent_encoding::NON_ALPHANUMERIC);
+        let server = tokio::spawn(serve_tls12_postgres_with_acceptor(listener, acceptor, false));
+        let url = format!(
+            "postgres://postgres@127.0.0.1:{port}/postgres?sslmode=verify-full&legacy_tls=true&sslrootcert={encoded_root}"
+        );
+
+        let error = connect_with_optional_local_timezone(&url, Duration::from_secs(2), None)
+            .await
+            .expect_err("verify-full must reject a certificate for another host");
+        assert!(error.to_ascii_lowercase().contains("certificate"), "{error}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn postgres_default_tls_still_connects_with_ecdhe_rsa() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(serve_tls12_postgres(listener, "ECDHE-RSA-AES128-GCM-SHA256", true));
+        let url = format!("postgres://postgres@127.0.0.1:{port}/postgres?sslmode=require");
+
+        let result = connect_with_optional_local_timezone(&url, Duration::from_secs(2), None).await;
+        assert!(result.is_ok(), "default TLS should keep negotiating ECDHE-RSA: {result:?}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn postgres_legacy_tls_cancel_uses_static_rsa_connector() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(serve_static_rsa_postgres_with_cancel(listener));
+        let url = format!("postgres://postgres@127.0.0.1:{port}/postgres?sslmode=require&legacy_tls=true");
+
+        let pool = connect_with_optional_local_timezone(&url, Duration::from_secs(2), None).await.unwrap();
+        let client = pool.get().await.unwrap();
+        let context = build_postgres_cancel_context(&url).unwrap();
+        assert!(context.legacy_tls);
+        cancel_postgres_query(client.cancel_token(), Some(&context), Duration::from_secs(2)).await;
+
         server.await.unwrap();
     }
 
@@ -9036,6 +9345,21 @@ mod tests {
     }
 
     #[test]
+    fn postgres_connection_url_extracts_legacy_tls_before_driver_parse() {
+        let parsed =
+            postgres_connection_url("postgres://localhost/db?sslmode=require&legacy_tls=true&application_name=dbx")
+                .unwrap();
+
+        assert_eq!(parsed.url, "postgres://localhost/db?sslmode=require&application_name=dbx");
+        assert!(parsed.legacy_tls);
+        tokio_postgres::Config::from_str(&parsed.url).unwrap();
+
+        let parsed = postgres_connection_url("postgres://localhost/db?legacy_tls=false").unwrap();
+        assert_eq!(parsed.url, "postgres://localhost/db");
+        assert!(!parsed.legacy_tls);
+    }
+
+    #[test]
     fn postgres_connection_url_normalizes_channel_binding_require_to_prefer() {
         let parsed =
             postgres_connection_url("postgres://localhost/db?sslmode=require&channel_binding=require").unwrap();
@@ -9184,6 +9508,7 @@ mod tests {
                     accepts_invalid_certs: true,
                     verifies_hostname: false,
                     ssl_mode: SslMode::Require,
+                    legacy_tls: false,
                 })
             ),
             Duration::from_secs(5)
@@ -9434,6 +9759,17 @@ mod tests {
     }
 
     #[test]
+    fn postgres_single_relation_metadata_can_resolve_through_search_path() {
+        for sql in [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL] {
+            assert!(sql.contains("CASE WHEN $1 = '' THEN quote_ident($2)"));
+            assert!(sql.contains("c.table_schema = relation_namespace.nspname"));
+        }
+        for sql in [POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL] {
+            assert!(sql.contains("t.oid = (CASE WHEN $1 = '' THEN quote_ident($2)"));
+        }
+    }
+
+    #[test]
     fn postgres_column_metadata_marks_only_owned_integer_sequence_defaults_as_serial() {
         let modern_sql = [POSTGRES_COLUMNS_SQL, postgres_columns_for_relations_sql()];
         let compat_sql = [POSTGRES_COLUMNS_COMPAT_SQL, postgres_columns_for_relations_compat_sql()];
@@ -9599,6 +9935,48 @@ mod tests {
             state_enum_values(&columns),
             Some(vec!["pending".to_string(), "active".to_string(), "archived".to_string()])
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_unqualified_metadata_follows_search_path() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        let client =
+            checkout_postgres_client(&pool, None, crate::db::connection_timeout()).await.expect("checkout client");
+        let suffix = std::process::id();
+        let schema = format!("dbx_search_path_meta_{suffix}");
+        let table = format!("comments_{suffix}");
+        let schema_ident = format!("\"{}\"", schema.replace('\"', "\"\""));
+        let table_ident = format!("\"{}\"", table.replace('\"', "\"\""));
+
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema_ident}; \
+                 CREATE TABLE {schema_ident}.{table_ident} (id integer PRIMARY KEY, display_name text); \
+                 COMMENT ON COLUMN {schema_ident}.{table_ident}.display_name IS '客户姓名'; \
+                 SET search_path TO {schema_ident}, public;"
+            ))
+            .await
+            .expect("create search_path metadata fixtures");
+
+        let columns = get_columns_with_sql(&client, POSTGRES_COLUMNS_SQL, "", &table)
+            .await
+            .expect("load columns through search_path");
+        assert_eq!(
+            columns.iter().find(|column| column.name == "display_name").and_then(|column| column.comment.as_deref()),
+            Some("客户姓名")
+        );
+
+        let indexes = list_indexes_with_sql(&client, POSTGRES_INDEXES_SQL, "", &table)
+            .await
+            .expect("load indexes through search_path");
+        assert!(indexes.iter().any(|index| index.is_primary && index.columns == ["id"]));
+
+        client
+            .batch_execute(&format!("RESET search_path; DROP SCHEMA {schema_ident} CASCADE"))
+            .await
+            .expect("clean search_path metadata fixtures");
     }
 
     #[tokio::test]

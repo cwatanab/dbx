@@ -34,6 +34,20 @@ describe("qualifiedTableName — SQLite attached databases", () => {
   });
 });
 
+describe("qualifiedTableName — schema-aware JDBC profiles", () => {
+  it("qualifies Phoenix tables without forcing identifier quotes", () => {
+    expect(qualifiedTableName({ databaseType: "jdbc", driverProfile: "phoenix", schema: "DEMO", tableName: "STUDENT" })).toBe("DEMO.STUDENT");
+  });
+
+  it("uses the driver-reported quote for Phoenix special identifiers", () => {
+    expect(qualifiedTableName({ databaseType: "jdbc", driverProfile: "phoenix", identifierQuote: '"', schema: "MY_SCHEMA", tableName: "ORDER" })).toBe('"MY_SCHEMA"."ORDER"');
+  });
+
+  it("keeps an unscoped JDBC table unqualified", () => {
+    expect(qualifiedTableName({ databaseType: "jdbc", driverProfile: "phoenix", tableName: "STUDENT" })).toBe("STUDENT");
+  });
+});
+
 describe("qualifiedTableName — GBase 8s", () => {
   it("omits the metadata owner for GBase 8s table data", () => {
     expect(qualifiedTableName({ databaseType: "informix", driverProfile: "gbase8s", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke" })).toBe("connection_smoke");

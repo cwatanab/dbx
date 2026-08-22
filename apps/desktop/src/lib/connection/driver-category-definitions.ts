@@ -32,7 +32,6 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   gbase8s: "domestic",
   goldendb: "domestic",
   h2: "lightweight",
-  "h2-legacy": "lightweight",
   highgo: "domestic",
   hive: "analytics",
   influxdb: "timeseries",

@@ -118,7 +118,6 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "access",
       "duckdb",
       "h2",
-      "h2-legacy",
       // document
       "cassandra",
       "mongodb",

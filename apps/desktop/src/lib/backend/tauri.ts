@@ -73,6 +73,7 @@ import type {
   DataGridColumnValueFilterConditionOptions,
   DataGridColumnValuesFilterConditionOptions,
   DataGridContextFilterConditionOptions,
+  DataGridConditionalUpdateSqlOptions,
   DataGridCountSqlOptions,
   DataGridCopyInsertStatementOptions,
   DataGridCopyUpdateStatementOptions,
@@ -437,6 +438,8 @@ export async function aiStream(sessionId: string, request: AiCompletionRequest, 
 export type AgentEvent =
   | { type: "turn_start"; turn: number }
   | { type: "text_delta"; delta: string }
+  | { type: "write_sql_confirmation_required"; sql: string }
+  | { type: "production_write_blocked"; sql: string }
   | { type: "reasoning_delta"; delta: string }
   | {
       type: "tool_call_start";
@@ -849,7 +852,7 @@ export interface AiChatMessage {
   content: string;
   mentions?: unknown[];
   reasoning?: string;
-  kind?: "contextSummary";
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
 }
 
 export interface AiConversation {
@@ -950,6 +953,10 @@ export async function sessionCredentialStatus(connectionId: string): Promise<boo
 
 export async function forgetSessionCredential(connectionId: string): Promise<void> {
   return invokeBackend("forget_session_credential", { connectionId });
+}
+
+export async function replaceNacosSessionCredential(connectionId: string, username: string, password: string): Promise<void> {
+  return invokeBackend("replace_nacos_session_credential", { connectionId, username, password });
 }
 
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
@@ -1173,6 +1180,38 @@ export async function executeQuery(
   }
 }
 
+export async function executeConditionalUpdate(
+  connectionId: string,
+  database: string,
+  sql: string,
+  schema?: string,
+  executionId?: string,
+  options?: {
+    maxRows?: number;
+    catalog?: string;
+    fetchSize?: number;
+    pageSize?: number;
+    rowOffset?: number;
+    resultSessionId?: string;
+    clientSessionId?: string;
+    timeoutSecs?: number;
+    executionMode?: "simple" | "postgres_read_only_transaction";
+  },
+): Promise<QueryResult> {
+  try {
+    return await invoke("execute_conditional_update", {
+      connectionId,
+      database,
+      sql,
+      schema,
+      executionId,
+      ...options,
+    });
+  } catch (error) {
+    throw new BackendErrorException(error);
+  }
+}
+
 export async function executeMulti(
   connectionId: string,
   database: string,
@@ -1283,6 +1322,15 @@ export async function refreshConnections(): Promise<void> {
 
 export async function cancelQuery(executionId: string): Promise<boolean> {
   return invoke("cancel_query", { executionId });
+}
+
+export interface ConditionalUpdateCancellationResult {
+  requested: boolean;
+  terminal: boolean;
+}
+
+export async function cancelConditionalUpdate(executionId: string): Promise<ConditionalUpdateCancellationResult> {
+  return invoke("cancel_conditional_update", { executionId });
 }
 
 export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
@@ -1584,6 +1632,11 @@ export async function buildDataGridColumnDistinctValuesSql(options: DataGridColu
 
 export async function buildDataGridCountSql(options: DataGridCountSqlOptions): Promise<string> {
   return invoke("build_data_grid_count_sql", { options });
+}
+
+export async function buildDataGridConditionalUpdateSql(options: DataGridConditionalUpdateSqlOptions): Promise<string | undefined> {
+  const result = await invoke<string | null>("build_data_grid_conditional_update_sql", { options });
+  return result ?? undefined;
 }
 
 export async function buildHiveTablePropertiesSql(options: HiveTablePropertiesSqlOptions): Promise<string> {
@@ -3502,6 +3555,14 @@ export async function mongoCloneCollection(connectionId: string, database: strin
     sourceCollection,
     targetCollection,
   });
+}
+
+export async function vectorDropDatabase(connectionId: string, database: string): Promise<void> {
+  return invoke("vector_drop_database", { connectionId, database });
+}
+
+export async function vectorDropCollection(connectionId: string, database: string, collection: string): Promise<void> {
+  return invoke("vector_drop_collection", { connectionId, database, collection });
 }
 
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {

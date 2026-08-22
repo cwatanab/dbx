@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database.ts";
 import { isSchemaAware, usesDatabaseObjectTreeMode } from "@/lib/database/databaseCapabilities.ts";
+import { jdbcDriverProfileUsesSchemaQualification } from "@/lib/database/jdbcDialect";
 import * as api from "@/lib/backend/api.ts";
 import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/database/sqlServerLinkedServers.ts";
 import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier } from "@/lib/sql/sqlIdentifier.ts";
@@ -57,6 +58,10 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
 }
 
 export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): string {
+  if (databaseType === "jdbc" && identifierQuote != null) {
+    if (!identifierQuote) return name;
+    return `${identifierQuote}${name.replaceAll(identifierQuote, identifierQuote + identifierQuote)}${identifierQuote}`;
+  }
   if ((databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "postgres") && identifierQuote != null) return quoteGaussDbJdbcIdentifier(name, identifierQuote);
   if ((databaseType === "kingbase" || databaseType === "informix" || databaseType === "spanner") && identifierQuote != null) {
     if (!identifierQuote) return name;
@@ -102,6 +107,11 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
       return `${quoteTableDataIdentifier(databaseType, trimmedSchema, identifierQuote)}.${quotedTable}`;
     }
     return quotedTable;
+  }
+  if (databaseType === "jdbc" && jdbcDriverProfileUsesSchemaQualification(driverProfile)) {
+    const quotedTable = quoteTableDataIdentifier(databaseType, tableName, identifierQuote);
+    const trimmedSchema = schema?.trim();
+    return trimmedSchema ? `${quoteTableDataIdentifier(databaseType, trimmedSchema, identifierQuote)}.${quotedTable}` : quotedTable;
   }
   // Cloud Spanner mirrors `uses_connection_identifier_quote` on the backend, which
   // counts Spanner unconditionally: the branch must not be gated on a reported
