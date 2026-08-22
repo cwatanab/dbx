@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime};
 use deadpool_postgres::{ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime};
 use futures::{SinkExt, StreamExt};
+#[cfg(feature = "postgres-legacy-tls")]
 use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
 use percent_encoding::percent_decode_str;
 use rust_decimal::Decimal;
@@ -2119,13 +2120,20 @@ async fn connect_postgres_pool_attempt(
         // in query.rs).
         let mgr_config = ManagerConfig { recycling_method: RecyclingMethod::Fast };
         let mgr = if postgres_url.legacy_tls {
-            log::info!("PostgreSQL legacy TLS compatibility enabled");
-            let tls = postgres_openssl_connector(
-                &postgres_url.ssl_files,
-                postgres_url.accepts_invalid_certs,
-                postgres_url.verifies_hostname,
-            )?;
-            deadpool_postgres::Manager::from_connect(pg_config.clone(), NoticeCapturingConnect { tls }, mgr_config)
+            #[cfg(feature = "postgres-legacy-tls")]
+            {
+                log::info!("PostgreSQL legacy TLS compatibility enabled");
+                let tls = postgres_openssl_connector(
+                    &postgres_url.ssl_files,
+                    postgres_url.accepts_invalid_certs,
+                    postgres_url.verifies_hostname,
+                )?;
+                deadpool_postgres::Manager::from_connect(pg_config.clone(), NoticeCapturingConnect { tls }, mgr_config)
+            }
+            #[cfg(not(feature = "postgres-legacy-tls"))]
+            {
+                return Err("PostgreSQL legacy TLS compatibility is not supported in this build".to_string());
+            }
         } else {
             let tls_config = postgres_tls_config(
                 &pg_config,
@@ -2306,6 +2314,7 @@ fn make_rustls_connect_from_context(
     Ok(tokio_postgres_rustls::MakeRustlsConnect::new(tls_config))
 }
 
+#[cfg(feature = "postgres-legacy-tls")]
 fn make_openssl_connect_from_context(
     ctx: &PostgresCancelContext,
 ) -> Result<postgres_openssl::MakeTlsConnector, String> {
@@ -2441,6 +2450,7 @@ fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
     Ok(PostgresConnectionUrl { url: sanitized_url, ssl_files, accepts_invalid_certs, verifies_hostname, legacy_tls })
 }
 
+#[cfg(feature = "postgres-legacy-tls")]
 fn postgres_openssl_connector(
     ssl_files: &PostgresSslFiles,
     accepts_invalid_certs: bool,
@@ -6404,12 +6414,22 @@ async fn cancel_postgres_query(
     let cancel_timeout = postgres_cancel_attempt_timeout(cancel_timeout, cancel_context);
     if let Some(ctx) = cancel_context {
         let tls_result = if ctx.legacy_tls {
-            match make_openssl_connect_from_context(ctx) {
-                Ok(tls) => Some(tokio::time::timeout(cancel_timeout, pg_cancel_token.cancel_query(tls)).await),
-                Err(err) => {
-                    log::warn!("Failed to build legacy TLS connector for cancel: {err}; falling back to NoTls cancel");
-                    None
+            #[cfg(feature = "postgres-legacy-tls")]
+            {
+                match make_openssl_connect_from_context(ctx) {
+                    Ok(tls) => Some(tokio::time::timeout(cancel_timeout, pg_cancel_token.cancel_query(tls)).await),
+                    Err(err) => {
+                        log::warn!(
+                            "Failed to build legacy TLS connector for cancel: {err}; falling back to NoTls cancel"
+                        );
+                        None
+                    }
                 }
+            }
+            #[cfg(not(feature = "postgres-legacy-tls"))]
+            {
+                log::warn!("Legacy TLS cancel not supported in this build; falling back to NoTls cancel");
+                None
             }
         } else {
             match make_rustls_connect_from_context(ctx) {
@@ -7311,13 +7331,21 @@ pub async fn copy_in(pool: &Pool, sql: &str, data: &[u8]) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "postgres-legacy-tls")]
     use openssl::asn1::Asn1Time;
+    #[cfg(feature = "postgres-legacy-tls")]
     use openssl::bn::{BigNum, MsbOption};
+    #[cfg(feature = "postgres-legacy-tls")]
     use openssl::hash::MessageDigest;
+    #[cfg(feature = "postgres-legacy-tls")]
     use openssl::pkey::PKey;
+    #[cfg(feature = "postgres-legacy-tls")]
     use openssl::rsa::Rsa;
+    #[cfg(feature = "postgres-legacy-tls")]
     use openssl::ssl::{Ssl, SslAcceptor, SslMethod, SslVersion};
+    #[cfg(feature = "postgres-legacy-tls")]
     use openssl::x509::extension::{BasicConstraints, KeyUsage, SubjectAlternativeName};
+    #[cfg(feature = "postgres-legacy-tls")]
     use openssl::x509::{X509NameBuilder, X509};
     use std::cell::Cell;
     use std::pin::Pin;
@@ -7372,6 +7400,7 @@ mod tests {
         plain_socket.write_all(&postgres_error_response("identity probe unavailable")).await.unwrap();
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     fn tls12_rsa_certificate_acceptor(cipher_list: &str) -> (SslAcceptor, Vec<u8>) {
         let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
         let mut name = X509NameBuilder::new().unwrap();
@@ -7410,6 +7439,7 @@ mod tests {
         (acceptor.build(), certificate_pem)
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     async fn accept_tls12_with_acceptor(
         mut socket: tokio::net::TcpStream,
         acceptor: &SslAcceptor,
@@ -7425,6 +7455,7 @@ mod tests {
         Ok(tls_socket)
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     async fn accept_tls12(
         socket: tokio::net::TcpStream,
         cipher_list: &str,
@@ -7433,6 +7464,7 @@ mod tests {
         accept_tls12_with_acceptor(socket, &acceptor).await
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     async fn authenticate_tls12_postgres(tls_socket: &mut tokio_openssl::SslStream<tokio::net::TcpStream>) {
         let startup_len = tls_socket.read_u32().await.unwrap();
         assert!(startup_len >= 8);
@@ -7454,6 +7486,7 @@ mod tests {
         tls_socket.write_all(&postgres_error_response("identity probe unavailable")).await.unwrap();
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     async fn serve_tls12_postgres(listener: TcpListener, cipher_list: &'static str, expect_handshake: bool) {
         let (socket, _) = listener.accept().await.unwrap();
         let handshake = accept_tls12(socket, cipher_list).await;
@@ -7465,6 +7498,7 @@ mod tests {
         authenticate_tls12_postgres(&mut tls_socket).await;
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     async fn serve_tls12_postgres_with_acceptor(listener: TcpListener, acceptor: SslAcceptor, expect_handshake: bool) {
         let (socket, _) = listener.accept().await.unwrap();
         let handshake = accept_tls12_with_acceptor(socket, &acceptor).await;
@@ -7476,6 +7510,7 @@ mod tests {
         authenticate_tls12_postgres(&mut tls_socket).await;
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     async fn serve_static_rsa_postgres_with_cancel(listener: TcpListener) {
         let (main_socket, _) = listener.accept().await.unwrap();
         let mut main_tls = accept_tls12(main_socket, "AES128-GCM-SHA256").await.unwrap();
@@ -7503,6 +7538,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     #[tokio::test]
     async fn postgres_default_tls_rejects_static_rsa_key_exchange() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7517,6 +7553,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     #[tokio::test]
     async fn postgres_legacy_tls_connects_with_static_rsa_key_exchange() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7529,6 +7566,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     #[tokio::test]
     async fn postgres_legacy_tls_verify_ca_uses_configured_root_without_hostname_check() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7550,6 +7588,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     #[tokio::test]
     async fn postgres_legacy_tls_verify_full_rejects_hostname_mismatch() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7573,6 +7612,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     #[tokio::test]
     async fn postgres_default_tls_still_connects_with_ecdhe_rsa() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -7585,6 +7625,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(feature = "postgres-legacy-tls")]
     #[tokio::test]
     async fn postgres_legacy_tls_cancel_uses_static_rsa_connector() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
