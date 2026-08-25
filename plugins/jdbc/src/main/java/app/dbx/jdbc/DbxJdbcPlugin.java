@@ -144,6 +144,7 @@ public final class DbxJdbcPlugin {
     private static String registeredDriverKey = "";
     private static String sharedConnectionKey = "";
     private static Connection sharedConnection;
+    private static boolean manualTransactionActive;
     private static final Map<String, QuerySession> QUERY_SESSIONS = new HashMap<>();
 
     record JdbcDriverQuirks(
@@ -353,6 +354,23 @@ public final class DbxJdbcPlugin {
                 nonNegativeInt(params, "rowOffset", 0),
                 nonNegativeInt(params, "timeoutSecs", -1)
             );
+            case "beginManualTransaction", "begin_manual_transaction" -> beginManualTransaction(
+                connection,
+                optionalText(params, "database"),
+                optionalText(params, "schema")
+            );
+            case "executeInManualTransaction", "execute_in_manual_transaction" -> executeInManualTransaction(
+                connection,
+                requireText(params, "sql"),
+                optionalText(params, "database"),
+                optionalText(params, "schema"),
+                positiveInt(params, "maxRows", MAX_ROWS),
+                nonNegativeInt(params, "fetchSize", 0),
+                nonNegativeInt(params, "rowOffset", 0),
+                nonNegativeInt(params, "timeoutSecs", -1)
+            );
+            case "commitManualTransaction", "commit_manual_transaction" -> commitManualTransaction();
+            case "rollbackManualTransaction", "rollback_manual_transaction" -> rollbackManualTransaction();
             case "executeQueryPage", "execute_query_page" -> executeQueryPage(
                 connection,
                 requireText(params, "sql"),
@@ -462,6 +480,10 @@ public final class DbxJdbcPlugin {
         );
         putMetadataText(info, "driverName", metadata::getDriverName);
         putMetadataText(info, "driverVersion", metadata::getDriverVersion);
+        Boolean supportsTransactions = readMetadata(metadata::supportsTransactions);
+        if (supportsTransactions != null) {
+            info.put("supportsTransactions", supportsTransactions);
+        }
 
         Integer jdbcMajor = readMetadata(metadata::getJDBCMajorVersion);
         Integer jdbcMinor = readMetadata(metadata::getJDBCMinorVersion);
@@ -554,6 +576,7 @@ public final class DbxJdbcPlugin {
         }
         String key = connectionKey(connection);
         if (sharedConnection != null && key.equals(sharedConnectionKey) && !sharedConnection.isClosed()) {
+            configureOrdinaryAutoCommit(sharedConnection);
             return sharedConnection;
         }
         closeSharedConnection();
@@ -582,17 +605,20 @@ public final class DbxJdbcPlugin {
             applyOracleProperties(connection, properties);
         }
         sharedConnection = DriverManager.getConnection(url, properties);
-        configurePhoenixAutoCommit(connection, url, sharedConnection);
         sharedConnectionKey = key;
+        configureOrdinaryAutoCommit(sharedConnection);
         return sharedConnection;
     }
 
-    private static void configurePhoenixAutoCommit(JsonNode connection, String url, Connection jdbcConnection)
-        throws SQLException {
-        if (!isPhoenixConnection(connection, url) || jdbcConnection.getAutoCommit()) {
+    private static void configureOrdinaryAutoCommit(Connection jdbcConnection) throws SQLException {
+        if (manualTransactionActive || hasActiveQuerySession(jdbcConnection) || jdbcConnection.getAutoCommit()) {
             return;
         }
         jdbcConnection.setAutoCommit(true);
+    }
+
+    private static boolean hasActiveQuerySession(Connection jdbcConnection) {
+        return QUERY_SESSIONS.values().stream().anyMatch(session -> session.connection == jdbcConnection);
     }
 
     private static boolean isPhoenixConnection(JsonNode connection, String url) {
@@ -775,8 +801,22 @@ public final class DbxJdbcPlugin {
         int rowOffset,
         int timeoutSecs
     ) throws Exception {
-        long start = System.nanoTime();
         Connection conn = openConnection(connection);
+        return executeQueryOnConnection(connection, conn, sql, database, schema, maxRows, fetchSize, rowOffset, timeoutSecs);
+    }
+
+    private static JsonNode executeQueryOnConnection(
+        JsonNode connection,
+        Connection conn,
+        String sql,
+        String database,
+        String schema,
+        int maxRows,
+        int fetchSize,
+        int rowOffset,
+        int timeoutSecs
+    ) throws Exception {
+        long start = System.nanoTime();
         applyExecutionContext(connection, conn, database, schema);
         JdbcDriverQuirks quirks = driverQuirks(connection);
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
@@ -824,6 +864,69 @@ public final class DbxJdbcPlugin {
             result.put("truncated", truncated);
             return result;
         }
+    }
+
+    private static ObjectNode beginManualTransaction(JsonNode connection, String database, String schema)
+        throws SQLException {
+        if (manualTransactionActive) {
+            throw new SQLException("A manual transaction is already active");
+        }
+        Connection conn = openConnection(connection);
+        DatabaseMetaData metadata = readMetadata(conn::getMetaData);
+        Boolean supportsTransactions = metadata == null ? null : readMetadata(metadata::supportsTransactions);
+        if (Boolean.FALSE.equals(supportsTransactions)) {
+            throw new SQLFeatureNotSupportedException("This JDBC driver does not support transactions");
+        }
+        applyExecutionContext(connection, conn, database, schema);
+        conn.setAutoCommit(false);
+        manualTransactionActive = true;
+        return okResult();
+    }
+
+    private static JsonNode executeInManualTransaction(
+        JsonNode connection,
+        String sql,
+        String database,
+        String schema,
+        int maxRows,
+        int fetchSize,
+        int rowOffset,
+        int timeoutSecs
+    ) throws Exception {
+        Connection conn = activeManualTransactionConnection(connection);
+        return executeQueryOnConnection(connection, conn, sql, database, schema, maxRows, fetchSize, rowOffset, timeoutSecs);
+    }
+
+    private static ObjectNode commitManualTransaction() throws SQLException {
+        Connection conn = activeManualTransactionConnection(null);
+        conn.commit();
+        conn.setAutoCommit(true);
+        manualTransactionActive = false;
+        return okResult();
+    }
+
+    private static ObjectNode rollbackManualTransaction() throws SQLException {
+        Connection conn = activeManualTransactionConnection(null);
+        conn.rollback();
+        conn.setAutoCommit(true);
+        manualTransactionActive = false;
+        return okResult();
+    }
+
+    private static Connection activeManualTransactionConnection(JsonNode connection) throws SQLException {
+        if (!manualTransactionActive || sharedConnection == null || sharedConnection.isClosed()) {
+            throw new SQLException("No manual transaction is active");
+        }
+        if (connection != null && !connectionKey(connection).equals(sharedConnectionKey)) {
+            throw new SQLException("The manual transaction belongs to a different JDBC connection");
+        }
+        return sharedConnection;
+    }
+
+    private static ObjectNode okResult() {
+        ObjectNode result = MAPPER.createObjectNode();
+        result.put("ok", true);
+        return result;
     }
 
     private record ExecutedStatement(ResultSet resultSet, int updateCount) {
@@ -1921,7 +2024,39 @@ public final class DbxJdbcPlugin {
             }
         }
 
+        if ((allowedObjectTypes.isEmpty() || allowedObjectTypes.contains("EVENT")) && isMysqlFamilyConnection(connection)) {
+            appendMysqlEvents(result, conn, database, schema);
+        }
+
         return filterMetadataNodes(result, filter, limit, offset, objectTypes, "object_type", false);
+    }
+
+    private static boolean isMysqlFamilyConnection(JsonNode connection) {
+        String url = jdbcUrl(connection);
+        return urlMatchesPrefix(url, "jdbc:mysql:") || urlMatchesPrefix(url, "jdbc:mariadb:") || urlMatchesPrefix(url, "jdbc:tidb:");
+    }
+
+    private static void appendMysqlEvents(ArrayNode result, Connection conn, String database, String schema) {
+        String eventSchema = emptyToNull(schema) != null ? schema : database;
+        if (eventSchema == null || eventSchema.isBlank()) return;
+        String sql = "SELECT EVENT_NAME, EVENT_SCHEMA, EVENT_COMMENT, CREATED, LAST_ALTERED FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ?";
+        try (PreparedStatement statement = conn.prepareStatement(sql)) {
+            statement.setString(1, eventSchema);
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = MAPPER.createObjectNode();
+                    item.put("name", rs.getString("EVENT_NAME"));
+                    item.put("object_type", "EVENT");
+                    putNullable(item, "schema", rs.getString("EVENT_SCHEMA"));
+                    putNullable(item, "comment", rs.getString("EVENT_COMMENT"));
+                    putNullable(item, "created_at", rs.getString("CREATED"));
+                    putNullable(item, "updated_at", rs.getString("LAST_ALTERED"));
+                    result.add(item);
+                }
+            }
+        } catch (SQLException ignored) {
+            // Lack of EVENT privilege must not hide tables and routines.
+        }
     }
 
     private static JsonNode listDataTypes(JsonNode connection, String database) throws SQLException {
@@ -2804,6 +2939,12 @@ public final class DbxJdbcPlugin {
     private static void closeSharedConnection() {
         closeAllQuerySessions();
         if (sharedConnection != null) {
+            if (manualTransactionActive) {
+                try {
+                    sharedConnection.rollback();
+                } catch (SQLException ignored) {
+                }
+            }
             try {
                 sharedConnection.close();
             } catch (SQLException ignored) {
@@ -2811,6 +2952,7 @@ public final class DbxJdbcPlugin {
             sharedConnection = null;
             sharedConnectionKey = "";
         }
+        manualTransactionActive = false;
     }
 
     private static String driverKey(JsonNode connection) {
