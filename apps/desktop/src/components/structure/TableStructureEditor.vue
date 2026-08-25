@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -32,6 +32,7 @@ import { invalidateObjectDdl, loadObjectDdl } from "@/lib/metadata/objectDdlCach
 import { invalidateObjectMetadataCache, loadObjectMetadataFacet, type ObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
 import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
+import { buildMysqlAutoIncrementCounterStatement, canEditMysqlAutoIncrementCounter, refreshMysqlAutoIncrementCounterDraft } from "@/lib/table/mysqlAutoIncrementCounter";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
 import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
 import { getPostgresDataTypeHelp, gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
@@ -205,13 +206,21 @@ const columns = ref<EditableStructureColumn[]>([]);
 const copyColumnsDialogOpen = ref(false);
 const copySourceTables = ref<TableInfo[]>([]);
 const copySourceTableName = ref("");
+const copySourceTableSearch = ref("");
 const copySourceColumns = ref<ColumnInfo[]>([]);
 const copySourceColumnSearch = ref("");
 const selectedCopySourceColumnNames = ref<string[]>([]);
 const copySourceTablesLoading = ref(false);
+const copySourceTablesOffset = ref(0);
+const copySourceTablesHasMore = ref(false);
 const copySourceColumnsLoading = ref(false);
 const copySourceError = ref("");
+const COPY_SOURCE_TABLE_PAGE_SIZE = 100;
+const COPY_SOURCE_TABLE_PAGE_PROBE_SIZE = COPY_SOURCE_TABLE_PAGE_SIZE + 2;
+const COPY_SOURCE_TABLE_SEARCH_DEBOUNCE_MS = 250;
+let copySourceTablesRequestId = 0;
 let copySourceColumnsRequestId = 0;
+let copySourceTableSearchTimer: ReturnType<typeof setTimeout> | undefined;
 const indexes = ref<EditableStructureIndex[]>([]);
 /** PostgreSQL partitioned parent (`relkind = 'p'`): `CREATE INDEX CONCURRENTLY`
  * is rejected by the server on such tables, so the option is disabled here and
@@ -904,6 +913,10 @@ const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.valu
 const newTableName = ref("");
 const tableComment = ref("");
 const originalTableComment = ref("");
+const mysqlAutoIncrementValue = ref<string>();
+const originalMysqlAutoIncrementValue = ref<string>();
+const mysqlAutoIncrementLoading = ref(false);
+const mysqlAutoIncrementLoadError = ref("");
 const tableOwner = ref("");
 const originalTableOwner = ref("");
 const tableOwnerLoading = ref(false);
@@ -912,6 +925,8 @@ const tableOwnerRoles = ref<string[]>([]);
 const tableOwnerRolesLoading = ref(false);
 const tableOwnerRolesLoadError = ref("");
 const supportsTableOwner = computed(() => !isCreateMode.value && databaseType.value === "postgres");
+const canEditMysqlAutoIncrement = computed(() => canEditMysqlAutoIncrementCounter(connection.value, isCreateMode.value, columns.value));
+const canBuildMysqlAutoIncrement = computed(() => canEditMysqlAutoIncrement.value && !mysqlAutoIncrementLoading.value && !mysqlAutoIncrementLoadError.value && originalMysqlAutoIncrementValue.value !== undefined);
 const tableOwnerOptions = computed(() => {
   const owner = tableOwner.value;
   if (!owner || tableOwnerRoles.value.includes(owner)) return tableOwnerRoles.value;
@@ -934,6 +949,7 @@ let sqlPreviewRequestId = 0;
 let structureLoadRequestId = 0;
 let tableOwnerLoadRequestId = 0;
 let tableOwnerRolesLoadRequestId = 0;
+let mysqlAutoIncrementLoadRequestId = 0;
 let dataTypeOptionsRequestId = 0;
 let sqlPreviewDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 let deferredSqlPreviewRefresh = false;
@@ -1119,6 +1135,8 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     newTableName: newTableName.value,
     tableComment: tableComment.value,
     originalTableComment: originalTableComment.value,
+    mysqlAutoIncrementValue: mysqlAutoIncrementValue.value,
+    originalMysqlAutoIncrementValue: originalMysqlAutoIncrementValue.value,
     tableOwner: tableOwner.value,
     originalTableOwner: originalTableOwner.value,
     columns: cloneDraftValue(columns.value),
@@ -1149,6 +1167,8 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   newTableName.value = draft.newTableName || "";
   tableComment.value = draft.tableComment || "";
   originalTableComment.value = draft.originalTableComment || "";
+  mysqlAutoIncrementValue.value = draft.mysqlAutoIncrementValue;
+  originalMysqlAutoIncrementValue.value = draft.originalMysqlAutoIncrementValue;
   tableOwner.value = draft.tableOwner || "";
   originalTableOwner.value = draft.originalTableOwner || "";
   columns.value = cloneDraftValue(draft.columns || []);
@@ -1235,7 +1255,15 @@ function hasPendingStructureChanges(): boolean {
     return !!newTableName.value.trim() || !!tableComment.value.trim() || columns.value.length > 0 || indexes.value.length > 0 || foreignKeys.value.length > 0 || triggers.value.length > 0;
   }
   const scope = captureStructureRefreshScope();
-  return scope.columns || scope.indexes || scope.foreignKeys || scope.triggers || scope.tableComment || (supportsTableOwner.value && tableOwner.value.trim() !== originalTableOwner.value.trim());
+  return (
+    scope.columns ||
+    scope.indexes ||
+    scope.foreignKeys ||
+    scope.triggers ||
+    scope.tableComment ||
+    (canBuildMysqlAutoIncrement.value && mysqlAutoIncrementValue.value !== originalMysqlAutoIncrementValue.value) ||
+    (supportsTableOwner.value && tableOwner.value.trim() !== originalTableOwner.value.trim())
+  );
 }
 
 function clearSqlPreviewState() {
@@ -1418,18 +1446,30 @@ async function refreshSqlPreview() {
   sqlPreviewLoading.value = true;
   const options = structureChangeOptions();
   try {
-    const result = isCreateMode.value ? await api.buildCreateTableSql(options) : hasSqliteTypeChange.value ? await api.previewSqliteTableStructureChange(props.connectionId, props.database, options) : await api.buildTableStructureChangeSql(options);
-    const ownerResult = supportsTableOwner.value
-      ? await api.buildTableOwnerChangeSql({
-          databaseType: databaseType.value,
-          schema: metadataSchema.value,
-          tableName: props.tableName || "",
-          owner: tableOwner.value,
-          originalOwner: originalTableOwner.value,
-        })
-      : { statements: [], warnings: [] };
+    const [result, ownerResult, mysqlAutoIncrementStatement] = await Promise.all([
+      isCreateMode.value ? api.buildCreateTableSql(options) : hasSqliteTypeChange.value ? api.previewSqliteTableStructureChange(props.connectionId, props.database, options) : api.buildTableStructureChangeSql(options),
+      supportsTableOwner.value
+        ? api.buildTableOwnerChangeSql({
+            databaseType: databaseType.value,
+            schema: metadataSchema.value,
+            tableName: props.tableName || "",
+            owner: tableOwner.value,
+            originalOwner: originalTableOwner.value,
+          })
+        : Promise.resolve({ statements: [], warnings: [] }),
+      buildMysqlAutoIncrementCounterStatement({
+        enabled: canBuildMysqlAutoIncrement.value,
+        originalValue: originalMysqlAutoIncrementValue.value,
+        value: mysqlAutoIncrementValue.value,
+        databaseType: databaseType.value,
+        driverProfile: connection.value?.driver_profile,
+        schema: props.schema || props.database,
+        tableName: props.tableName || "",
+        buildSql: api.buildMysqlAutoIncrementSql,
+      }),
+    ]);
     if (requestId !== sqlPreviewRequestId) return;
-    pendingStatements.value = [...result.statements, ...ownerResult.statements];
+    pendingStatements.value = [...result.statements, ...ownerResult.statements, ...(mysqlAutoIncrementStatement ? [mysqlAutoIncrementStatement] : [])];
     warnings.value = [...result.warnings, ...ownerResult.warnings];
     sqliteSchemaRevision.value = "schemaRevision" in result && typeof result.schemaRevision === "string" ? result.schemaRevision : undefined;
   } catch (e: any) {
@@ -1497,6 +1537,11 @@ function resetState() {
   newTableName.value = "";
   tableComment.value = "";
   originalTableComment.value = "";
+  mysqlAutoIncrementValue.value = undefined;
+  originalMysqlAutoIncrementValue.value = undefined;
+  mysqlAutoIncrementLoadRequestId += 1;
+  mysqlAutoIncrementLoading.value = false;
+  mysqlAutoIncrementLoadError.value = "";
   tableOwner.value = "";
   originalTableOwner.value = "";
   tableOwnerLoadRequestId += 1;
@@ -1568,6 +1613,32 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
 
 function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
   return loadObjectMetadataFacet(request, "comment", () => fetchTableCommentValue(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
+}
+
+async function loadMysqlAutoIncrementCounter(preserveDraft = false) {
+  const requestId = ++mysqlAutoIncrementLoadRequestId;
+  if (!canEditMysqlAutoIncrement.value || !props.connectionId || !props.database || !props.tableName) {
+    mysqlAutoIncrementValue.value = undefined;
+    originalMysqlAutoIncrementValue.value = undefined;
+    mysqlAutoIncrementLoading.value = false;
+    mysqlAutoIncrementLoadError.value = "";
+    return;
+  }
+  mysqlAutoIncrementLoading.value = true;
+  mysqlAutoIncrementLoadError.value = "";
+  try {
+    await store.ensureConnected(props.connectionId);
+    const value = await api.getMysqlTableAutoIncrement(props.connectionId, props.database, props.tableName);
+    if (requestId !== mysqlAutoIncrementLoadRequestId) return;
+    const draft = refreshMysqlAutoIncrementCounterDraft(value, { value: mysqlAutoIncrementValue.value, originalValue: originalMysqlAutoIncrementValue.value }, preserveDraft);
+    originalMysqlAutoIncrementValue.value = draft.originalValue;
+    mysqlAutoIncrementValue.value = draft.value;
+  } catch (error: any) {
+    if (requestId !== mysqlAutoIncrementLoadRequestId) return;
+    mysqlAutoIncrementLoadError.value = error?.message || String(error);
+  } finally {
+    if (requestId === mysqlAutoIncrementLoadRequestId) mysqlAutoIncrementLoading.value = false;
+  }
 }
 
 async function loadTableOwner(force = false, preserveDraft = false) {
@@ -1704,6 +1775,8 @@ async function loadStructure(
       if (!options.preserveDraft) clearColumnSelection();
     }
 
+    await loadMysqlAutoIncrementCounter(options.preserveDraft === true);
+
     const nextTableComment = await tableCommentPromise;
     if (nextTableComment !== undefined) {
       originalTableComment.value = nextTableComment;
@@ -1784,6 +1857,7 @@ async function refreshStructureAfterSave(scope: TableStructureRefreshScope, char
     console.warn("[DBX][structure-editor:post-save-refresh-failed]", e);
   } finally {
     postSaveRefreshing.value = false;
+    if (mysqlAutoIncrementValue.value !== originalMysqlAutoIncrementValue.value) scheduleSqlPreviewRefresh();
     if (activeTab.value === "ddl") void fetchDdl(true);
   }
 }
@@ -1907,11 +1981,75 @@ const selectedCopySourceColumns = computed(() => {
   return copyableSourceColumns.value.filter(({ column, alreadyExists }) => !alreadyExists && selected.has(column.name)).map(({ column }) => column);
 });
 const allCopyableSourceColumnsSelected = computed(() => copyableSourceColumnNames.value.length > 0 && copyableSourceColumnNames.value.every((name) => selectedCopySourceColumnNames.value.includes(name)));
+const copySourceTablesHasPreviousPage = computed(() => copySourceTablesOffset.value > 0);
+
+function clearCopySourceTableSearchTimer() {
+  if (copySourceTableSearchTimer === undefined) return;
+  clearTimeout(copySourceTableSearchTimer);
+  copySourceTableSearchTimer = undefined;
+}
+
+function isCopySourceTable(table: TableInfo): boolean {
+  const databaseInfo = connection.value?.database_info;
+  return isCreateMode.value || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
+}
+
+function clearCopySourceTableSelection() {
+  copySourceTableName.value = "";
+  copySourceColumns.value = [];
+  copySourceColumnSearch.value = "";
+  selectedCopySourceColumnNames.value = [];
+  copySourceColumnsRequestId++;
+  copySourceColumnsLoading.value = false;
+}
+
+async function loadCopySourceTables(offset = 0) {
+  if (!props.connectionId || !props.database) return;
+  clearCopySourceTableSelection();
+  const requestId = ++copySourceTablesRequestId;
+  copySourceTablesLoading.value = true;
+  copySourceError.value = "";
+  try {
+    await store.ensureConnected(props.connectionId);
+    const tables = await api.listTables(props.connectionId, props.database, metadataSchema.value, copySourceTableSearch.value.trim() || undefined, COPY_SOURCE_TABLE_PAGE_PROBE_SIZE, offset, ["TABLE"], props.catalog);
+    if (requestId !== copySourceTablesRequestId) return;
+    copySourceTables.value = tables.slice(0, COPY_SOURCE_TABLE_PAGE_SIZE).filter(isCopySourceTable);
+    copySourceTablesOffset.value = offset;
+    // The current table is excluded locally. Probe the next two rows so its
+    // presence immediately after a full page does not create an empty next page.
+    copySourceTablesHasMore.value = tables.slice(COPY_SOURCE_TABLE_PAGE_SIZE).some(isCopySourceTable);
+  } catch (error: any) {
+    if (requestId !== copySourceTablesRequestId) return;
+    copySourceTables.value = [];
+    copySourceTablesHasMore.value = false;
+    copySourceError.value = error?.message || String(error);
+  } finally {
+    if (requestId === copySourceTablesRequestId) copySourceTablesLoading.value = false;
+  }
+}
+
+function updateCopySourceTableSearch(value: string | number) {
+  copySourceTableSearch.value = String(value);
+  clearCopySourceTableSelection();
+  clearCopySourceTableSearchTimer();
+  copySourceTableSearchTimer = setTimeout(() => {
+    copySourceTableSearchTimer = undefined;
+    void loadCopySourceTables();
+  }, COPY_SOURCE_TABLE_SEARCH_DEBOUNCE_MS);
+}
+
+watch(copyColumnsDialogOpen, (open) => {
+  if (open) return;
+  clearCopySourceTableSearchTimer();
+  copySourceTablesRequestId++;
+  copySourceColumnsRequestId++;
+});
 
 async function openCopyColumnsDialog() {
   if (!canAddColumn.value || !props.connectionId || !props.database) return;
   copyColumnsDialogOpen.value = true;
   copySourceTableName.value = "";
+  copySourceTableSearch.value = "";
   copySourceColumns.value = [];
   copySourceColumnSearch.value = "";
   selectedCopySourceColumnNames.value = [];
@@ -1919,21 +2057,10 @@ async function openCopyColumnsDialog() {
   copySourceColumnsRequestId++;
   copySourceColumnsLoading.value = false;
   copySourceTables.value = [];
-  copySourceTablesLoading.value = true;
-  try {
-    await store.ensureConnected(props.connectionId);
-    const databaseInfo = connection.value?.database_info;
-    const currentTableIdentifierKey = tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
-    copySourceTables.value = (await api.listTables(props.connectionId, props.database, metadataSchema.value, undefined, undefined, undefined, undefined, props.catalog)).filter((table) => {
-      const tableType = table.table_type.toUpperCase();
-      return tableType !== "VIEW" && tableType !== "MATERIALIZED_VIEW" && (isCreateMode.value || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== currentTableIdentifierKey);
-    });
-  } catch (error: any) {
-    copySourceTables.value = [];
-    copySourceError.value = error?.message || String(error);
-  } finally {
-    copySourceTablesLoading.value = false;
-  }
+  copySourceTablesOffset.value = 0;
+  copySourceTablesHasMore.value = false;
+  clearCopySourceTableSearchTimer();
+  await loadCopySourceTables();
 }
 
 async function loadCopySourceColumns(tableName: string) {
@@ -3230,6 +3357,7 @@ onMounted(() => {
   if (props.draft?.initialized) {
     void hydrateRestoredDraftFromDatabase().then(() => {
       applyInitialStructureTarget();
+      void loadMysqlAutoIncrementCounter(true);
       void loadActiveTableStructureMetadataIfNeeded();
     });
   } else if (isCreateMode.value) {
@@ -3252,6 +3380,7 @@ onActivated(() => {
     applyInitialStructureTarget();
     void hydrateRestoredDraftFromDatabase().then(() => {
       applyInitialStructureTarget();
+      void loadMysqlAutoIncrementCounter(true);
       void loadActiveTableStructureMetadataIfNeeded();
     });
   }
@@ -3265,6 +3394,7 @@ onDeactivated(() => {
   stopStructureHorizontalScrollbarDrag();
 });
 onBeforeUnmount(() => {
+  clearCopySourceTableSearchTimer();
   stopColumnDragTracking();
   stopStructureHorizontalScrollbarDrag();
   structureHorizontalScrollbarObserverGeneration += 1;
@@ -3360,7 +3490,25 @@ watch([() => props.connectionId, () => props.database, databaseType], () => {
 });
 
 watch(
-  [isCreateMode, () => props.connectionId, () => props.database, databaseType, () => props.schema, () => props.tableName, newTableName, tableComment, tableOwner, columns, indexes, foreignKeys, triggers],
+  [
+    isCreateMode,
+    () => props.connectionId,
+    () => props.database,
+    databaseType,
+    () => props.schema,
+    () => props.tableName,
+    newTableName,
+    tableComment,
+    mysqlAutoIncrementValue,
+    originalMysqlAutoIncrementValue,
+    mysqlAutoIncrementLoading,
+    mysqlAutoIncrementLoadError,
+    tableOwner,
+    columns,
+    indexes,
+    foreignKeys,
+    triggers,
+  ],
   () => {
     scheduleSqlPreviewRefresh();
     syncDraftToParent();
@@ -3474,6 +3622,26 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
           <Info :class="[structureIconClass, 'shrink-0 text-muted-foreground']" />
         </TooltipTrigger>
         <TooltipContent>{{ t("structureEditor.tableCommentUnsupported") }}</TooltipContent>
+      </Tooltip>
+    </div>
+
+    <div v-if="canEditMysqlAutoIncrement" class="flex shrink-0 items-center gap-2">
+      <label class="shrink-0 font-medium text-muted-foreground">AUTO_INCREMENT</label>
+      <Input
+        v-model="mysqlAutoIncrementValue"
+        inputmode="numeric"
+        autocomplete="off"
+        data-mysql-auto-increment-counter
+        :placeholder="mysqlAutoIncrementLoading ? t('common.loading') : '—'"
+        :title="mysqlAutoIncrementLoadError || undefined"
+        :class="[structureMonoControlClass, 'max-w-[220px]']"
+        :disabled="mysqlAutoIncrementLoading || !!mysqlAutoIncrementLoadError || originalMysqlAutoIncrementValue === undefined || saving"
+      />
+      <Tooltip v-if="mysqlAutoIncrementLoadError">
+        <TooltipTrigger as-child>
+          <AlertTriangle :class="[structureIconClass, 'shrink-0 text-destructive']" />
+        </TooltipTrigger>
+        <TooltipContent>{{ mysqlAutoIncrementLoadError }}</TooltipContent>
       </Tooltip>
     </div>
 
@@ -4335,18 +4503,10 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
         </DialogHeader>
 
         <div class="space-y-3 overflow-hidden">
-          <label class="grid gap-1.5 text-sm font-medium">
-            {{ t("structureEditor.copyColumnsSourceTable") }}
-            <select
-              :value="copySourceTableName"
-              class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
-              :disabled="copySourceTablesLoading || copySourceTables.length === 0"
-              @change="loadCopySourceColumns(($event.target as HTMLSelectElement).value)"
-            >
-              <option value="" disabled>{{ t("structureEditor.copyColumnsSelectSourceTable") }}</option>
-              <option v-for="table in copySourceTables" :key="table.name" :value="table.name">{{ table.name }}</option>
-            </select>
-          </label>
+          <div class="grid gap-1.5 text-sm font-medium">
+            <label for="copy-source-table-search">{{ t("structureEditor.copyColumnsSourceTable") }}</label>
+            <Input id="copy-source-table-search" :model-value="copySourceTableSearch" :placeholder="t('structureEditor.copyColumnsSearchSourceTables')" @update:model-value="updateCopySourceTableSearch" />
+          </div>
 
           <div v-if="copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
             <Loader2 class="h-4 w-4 animate-spin" />
@@ -4356,9 +4516,47 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
             {{ copySourceError }}
           </div>
           <div v-else-if="copySourceTables.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
-            {{ t("structureEditor.copyColumnsNoSourceTables") }}
+            {{ copySourceTableSearch ? t("structureEditor.copyColumnsNoMatchingSourceTables") : t("structureEditor.copyColumnsNoSourceTables") }}
           </div>
-          <template v-else-if="copySourceTableName">
+          <template v-else>
+            <div class="max-h-52 overflow-y-auto rounded-md border" :aria-label="t('structureEditor.copyColumnsSourceTable')">
+              <button
+                v-for="table in copySourceTables"
+                :key="table.name"
+                type="button"
+                :aria-pressed="table.name === copySourceTableName"
+                :class="['flex h-9 w-full items-center px-3 text-left font-mono text-sm hover:bg-muted/50 focus-visible:bg-muted focus-visible:outline-none', table.name === copySourceTableName ? 'bg-muted' : '']"
+                @click="loadCopySourceColumns(table.name)"
+              >
+                <span class="truncate" :title="table.name">{{ table.name }}</span>
+              </button>
+            </div>
+            <div v-if="copySourceTablesHasPreviousPage || copySourceTablesHasMore" class="flex items-center justify-end gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                :disabled="copySourceTablesLoading || !copySourceTablesHasPreviousPage"
+                :title="t('structureEditor.copyColumnsPreviousSourceTablePage')"
+                :aria-label="t('structureEditor.copyColumnsPreviousSourceTablePage')"
+                @click="loadCopySourceTables(Math.max(0, copySourceTablesOffset - COPY_SOURCE_TABLE_PAGE_SIZE))"
+              >
+                <ChevronLeft class="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                :disabled="copySourceTablesLoading || !copySourceTablesHasMore"
+                :title="t('structureEditor.copyColumnsNextSourceTablePage')"
+                :aria-label="t('structureEditor.copyColumnsNextSourceTablePage')"
+                @click="loadCopySourceTables(copySourceTablesOffset + COPY_SOURCE_TABLE_PAGE_SIZE)"
+              >
+                <ChevronRight class="h-4 w-4" />
+              </Button>
+            </div>
+          </template>
+          <template v-if="copySourceTableName">
             <div class="flex items-center justify-between gap-2">
               <span class="text-sm font-medium">{{ t("structureEditor.copyColumnsSelectFields") }}</span>
               <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="copySourceColumnsLoading || copyableSourceColumnNames.length === 0" @click="toggleCopySourceColumns">
