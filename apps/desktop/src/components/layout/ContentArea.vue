@@ -124,7 +124,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
+import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
 import {
   databaseDisplayNameForTab,
   executionSummaryItems,
@@ -162,10 +162,12 @@ import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollecti
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: () => boolean;
+  openGoToColumn: () => boolean;
   openCellDetailSearch: () => boolean;
   nullColumnsHidden: boolean;
   allNullColumnCount: number;
@@ -221,6 +223,7 @@ const emit = defineEmits<{
   editorUpdate: [tabId: string, value: string];
   editorSelectionChange: [value: string];
   editorCursorChange: [pos: number];
+  previewChangesAvailable: [value: boolean];
   editorViewportChange: [tabId: string, viewport: { scrollTop: number; scrollLeft: number }];
   editorSelectionStateChange: [tabId: string, selection: { anchor: number; head: number }];
   formatError: [];
@@ -488,6 +491,7 @@ const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
+const activeResultIsLoading = computed(() => isActiveResultLoading(props.activeTab));
 const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
 const showResultRunSelector = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
 const canCloseQueryResult = computed(() => props.activeTab.mode === "query" && !props.activeTab.isExecuting && !props.activeTab.activeResultRunId && (!!props.activeTab.result || !!props.activeTab.results?.length || props.activeTab.resultEvicted === true));
@@ -901,6 +905,11 @@ function focusSearch(): boolean {
   return dataGridRef.value?.focusSearch() ?? false;
 }
 
+function openGoToColumn(): boolean {
+  if (props.activeTab.mode !== "data") return false;
+  return dataGridRef.value?.openGoToColumn() ?? false;
+}
+
 function refreshQueryEditorCompletionCache(): boolean {
   if (props.activeTab.mode !== "query" || !queryEditorRef.value) return false;
   queryEditorRef.value.refreshCompletionCache();
@@ -1116,8 +1125,16 @@ function requestQueryEditorExecute() {
   return queryEditorRef.value?.requestExecute();
 }
 
+function captureQueryEditorExecutionSnapshot() {
+  return queryEditorRef.value?.captureExecutionSnapshot();
+}
+
 function requestQueryEditorExecuteInNewResultTab() {
   return queryEditorRef.value?.requestExecuteInNewResultTab();
+}
+
+function requestQueryEditorPreviewChanges(stackSql?: string) {
+  return queryEditorRef.value?.requestPreviewChanges?.(stackSql);
 }
 
 function shouldBlockQueryEditorExecutionShortcut(event: KeyboardEvent) {
@@ -1126,6 +1143,10 @@ function shouldBlockQueryEditorExecutionShortcut(event: KeyboardEvent) {
 
 function acceptQueryEditorExecutionViewport(requestId: number) {
   return queryEditorRef.value?.acceptGutterExecutionViewport(requestId) ?? false;
+}
+
+function cancelQueryEditorExecutionViewport(requestId: number) {
+  return queryEditorRef.value?.cancelGutterExecutionViewport(requestId) ?? false;
 }
 
 async function handleExportQuery(payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }) {
@@ -1162,14 +1183,18 @@ async function executeRedisCommand(command: string): Promise<boolean> {
 
 defineExpose({
   focusSearch,
+  openGoToColumn,
   refreshData,
   toggleResultsPane,
   refreshQueryEditorCompletionCache,
   handleModRTarget,
   requestQueryEditorExecute,
+  captureQueryEditorExecutionSnapshot,
   requestQueryEditorExecuteInNewResultTab,
+  requestQueryEditorPreviewChanges,
   shouldBlockQueryEditorExecutionShortcut,
   acceptQueryEditorExecutionViewport,
+  cancelQueryEditorExecutionViewport,
   pasteClipboardAsSqlInCondition,
   applyTableStructureChanges,
   insertRedisCommand,
@@ -1223,6 +1248,7 @@ defineExpose({
               @selection-change="emit('editorSelectionChange', $event)"
               @send-selection-to-ai="emit('sendSelectionToAi', $event)"
               @cursor-change="emit('editorCursorChange', $event)"
+              @preview-changes-available="emit('previewChangesAvailable', $event)"
               @viewport-change="emit('editorViewportChange', activeTab.id, $event)"
               @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
               @format-error="emit('formatError')"
@@ -1361,7 +1387,13 @@ defineExpose({
                       <Wrench class="h-4 w-4" />
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent align="end" class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+                  <PopoverContent
+                    align="end"
+                    :collision-padding="8"
+                    class="w-max min-w-44 max-h-[var(--reka-popover-content-available-height)] max-w-[calc(100vw-2rem)] gap-0 overflow-x-hidden overflow-y-auto rounded-md border bg-popover p-0 text-popover-foreground shadow-xl"
+                    @click.stop
+                    @keydown.stop
+                  >
                     <div class="border-b bg-muted/40 px-3 py-2">
                       <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
                     </div>
@@ -1753,7 +1785,7 @@ defineExpose({
                 :initial-order-by-input="activeTab.orderByInput"
                 :sql="activeResultSql"
                 :export-sql="activeResultExportSql"
-                :loading="activeTab.isExecuting"
+                :loading="activeResultIsLoading"
                 :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
                 :source-columns="activeTab.querySourceColumns"
                 :readonly-column-indexes="groupedQueryReadonlyColumnIndexes(activeTab)"
@@ -1763,7 +1795,7 @@ defineExpose({
                 :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
                 :query-editability-reason="activeTab.queryEditabilityReason"
                 :allow-insert-rows="activeTab.queryAnalysis?.allowInsert ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
-                :allow-delete-rows="activeTab.queryAnalysis?.allowInsertDelete !== false"
+                :allow-delete-rows="activeTab.queryAnalysis?.allowDelete ?? activeTab.queryAnalysis?.allowInsertDelete !== false"
                 context="results"
                 :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
                 :database-type="activeEffectiveDatabaseType"
@@ -1775,9 +1807,11 @@ defineExpose({
                 :page-offset="activeTab.resultPageOffset"
                 :page-limit="activeTab.resultPageLimit"
                 :count-sql="activeTab.resultCountSql"
+                :count-total-rows="activeTab.resultCountSql ? () => queryStore.countTabResultRows(activeTab.id) : undefined"
                 :total-row-count="activeTab.resultTotalRowCount"
                 :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
                 :total-row-count-loading="activeTab.resultTotalRowCountLoading"
+                :page-jump-progress="activeTab.resultPageJumpProgress"
                 :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
                 :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
                 :query-result-export-request="
@@ -1923,7 +1957,7 @@ defineExpose({
                 <Wrench class="h-4 w-4" />
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="end" class="w-max min-w-44 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
+            <PopoverContent align="end" :collision-padding="8" class="w-max min-w-44 max-h-[var(--reka-popover-content-available-height)] max-w-[calc(100vw-2rem)] gap-0 overflow-x-hidden overflow-y-auto rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
               <div class="border-b bg-muted/40 px-3 py-2">
                 <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
               </div>
@@ -2226,7 +2260,7 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'nacos-access-control'">
       <div class="flex-1 min-h-0">
-        <NacosAccessControlConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :read-only="activeConnection?.read_only ?? false" />
+        <NacosAccessControlConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :read-only="connectionIsEffectivelyReadOnly(activeConnection)" />
       </div>
     </template>
 
@@ -2297,7 +2331,7 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'mq'">
       <div class="flex-1 min-h-0">
-        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="activeConnection?.read_only ?? false" />
+        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="connectionIsEffectivelyReadOnly(activeConnection)" />
       </div>
     </template>
 
@@ -2318,7 +2352,7 @@ defineExpose({
           :target-group="activeTab.nacosTargetGroup"
           :target-keyword="activeTab.nacosTargetKeyword"
           :target-request-id="activeTab.nacosTargetRequestId"
-          :read-only="activeConnection?.read_only ?? false"
+          :read-only="connectionIsEffectivelyReadOnly(activeConnection)"
         />
       </div>
     </template>
@@ -2342,6 +2376,7 @@ defineExpose({
           :initial-event-name="activeTab.objectBrowser?.eventName"
           :initial-event-read-only="activeTab.objectBrowser?.eventReadOnly"
           :initial-event-open-request-id="activeTab.objectBrowser?.eventOpenRequestId"
+          :initial-event-create-request-id="activeTab.objectBrowser?.eventCreateRequestId"
           :initial-object-filter="activeTab.objectBrowser?.initialObjectFilter"
           :viewport="activeTab.objectBrowser?.viewport"
           @open-table="emit('openObjectTable', $event)"

@@ -11,6 +11,10 @@ dynamodb = ["dep:aws-sdk-dynamodb"]
 mq-admin = ["dep:rumqttc"]
 postgres-legacy-tls = ["dep:postgres-openssl", "dep:openssl"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+sqlite-multiple-ciphers = ["dep:libsqlite3-hotbundle"]
+# Keeps bundled SQLite for consumers that enable no other sqlite source
+# (dbx-cli, dbx-mcp); do not combine with the cipher features.
+sqlite-bundled = ["rusqlite/bundled"]
 openapi = ["dep:utoipa"]
 system-fonts = ["font-kit"]
 
@@ -34,7 +38,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = { version = "0.4", features = ["serde"] }
 httpdate = "1"
-rust_decimal = { version = "1", features = ["serde", "db-postgres"] }
+rust_decimal = { version = "1", features = ["serde"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
@@ -43,7 +47,9 @@ tokio-postgres-rustls = "0.13"
 postgres-openssl = { version = "0.5", optional = true }
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 webpki-roots = "0.26"
-rusqlite = { version = "0.32", features = ["bundled", "load_extension", "backup", "functions", "column_decltype"] }
+rusqlite = { version = "0.32", default-features = false, features = ["load_extension", "backup", "functions", "column_decltype"] }
+libsqlite3-hotbundle = { git = "https://github.com/zipg/libsqlite3-hotbundle.git", rev = "7f12f203b4f4694a273410bd9b02d77f82b6114e", features = ["cipher-sqlcipher"], optional = true }
+dbx-sqlite-worker = { path = "../dbx-sqlite-worker", default-features = false }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 sqlparser = { version = "0.62.0", features = ["visitor"] }
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }

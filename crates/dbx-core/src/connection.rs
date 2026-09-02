@@ -101,6 +101,7 @@ pub enum PoolKind {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    InfluxDb3(db::influxdb3_driver::Influxdb3Client),
     VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
     ExternalDriver {
@@ -143,6 +144,7 @@ impl PoolKind {
             Self::HBase(client) => Some(Self::HBase(client.clone())),
             Self::VectorDb(client) => Some(Self::VectorDb(client.clone())),
             Self::InfluxDb(client) => Some(Self::InfluxDb(client.clone())),
+            Self::InfluxDb3(client) => Some(Self::InfluxDb3(client.clone())),
             Self::VictoriaMetrics(client) => Some(Self::VictoriaMetrics(client.clone())),
             Self::Agent(client) => Some(Self::Agent(client.clone())),
             Self::ExternalDriver { driver_id, config, session } => Some(Self::ExternalDriver {
@@ -173,15 +175,29 @@ impl PoolKind {
 
 enum ConnectionDatabaseInfoSource {
     Agent(Arc<db::agent_driver::PooledAgentClient>),
-    ExternalDriver { config: Arc<ConnectionConfig>, session: Arc<PluginDriverSession> },
+    MongoAgent(Arc<db::agent_driver::PooledAgentClient>, Option<String>),
+    ExternalDriver {
+        config: Arc<ConnectionConfig>,
+        session: Arc<PluginDriverSession>,
+    },
     NativeMysql(db::mysql::MySqlPool),
     NativeHBase(db::hbase_driver::HBaseClient),
+    NativeMongo(mongodb::Client, Option<String>),
+    Meilisearch(db::meilisearch_driver::MeilisearchClient),
+    VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
+    Redis(String),
+    Nacos,
+    Consul(Box<crate::consul::ConsulClient>),
+    #[cfg(feature = "mq-admin")]
+    MessageQueue,
 }
 
 /// Held connection for a manual transaction session
 pub enum TxnConnection {
     Postgres(Box<deadpool_postgres::Object>),
-    Mysql(mysql_async::Conn),
+    /// A dedicated MySQL connection. Cancellation may consume and discard this
+    /// connection instead of trying to reuse it after an interrupted result set.
+    Mysql(Option<mysql_async::Conn>),
     /// Dedicated agent multi_session workload client with an open sticky TX.
     Agent {
         client: Arc<db::agent_driver::PooledAgentClient>,
@@ -235,6 +251,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Hive
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
+            | DatabaseType::Argo
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix
@@ -283,10 +300,19 @@ pub struct AppState {
     /// Web 端 owner 为已认证会话 token，不同登录会话互不可见。建池/池重建/
     /// AI/元数据从它读取，前端通过状态接口查询。
     pub session_credentials: SessionCredentialStore,
+    /// In-memory, never-persisted 1/5 minute write overrides for read-only connections.
+    pub write_unlock_windows: crate::write_unlock::WriteUnlockWindows,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     mongo_oidc_browser_opener: std::sync::RwLock<Option<MongoOidcBrowserOpener>>,
     #[cfg(feature = "mq-admin")]
     pub mq_registry: crate::mq::MqAdminRegistry,
+}
+
+fn transport_layers_through_last_ssh(layers: &[TransportLayerConfig]) -> Result<&[TransportLayerConfig], String> {
+    let Some(last_ssh_index) = layers.iter().rposition(|layer| matches!(layer, TransportLayerConfig::Ssh(_))) else {
+        return Err("Connection has no enabled SSH tunnel layer".to_string());
+    };
+    Ok(&layers[..=last_ssh_index])
 }
 
 /// 活跃时间以进程内单调时钟的相对毫秒存储（AtomicU64）：热路径每条查询都要
@@ -1225,6 +1251,7 @@ impl AppState {
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_credentials: SessionCredentialStore::new(),
+            write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
             mongo_oidc_browser_opener: std::sync::RwLock::new(None),
             #[cfg(feature = "mq-admin")]
@@ -2113,29 +2140,44 @@ impl AppState {
                 PoolKind::Postgres(pg_pool)
             }
             DatabaseType::Sqlite => {
-                let sqlite_path = expand_tilde(&db_config.host);
-                db::sqlite::validate_persistent_attachments(
-                    &sqlite_path,
-                    &db_config.password,
-                    !db_config.attached_databases.is_empty(),
-                )?;
-                let extensions = db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
-                    .into_iter()
-                    .map(|mut extension| {
-                        extension.path = expand_tilde(&extension.path);
-                        extension
-                    })
-                    .collect();
-                let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
-                    &sqlite_path,
-                    &db_config.password,
-                    extensions,
-                )
-                .await?;
-                for attached in &db_config.attached_databases {
-                    db::sqlite::attach_database(&pool, &attached.name, &expand_tilde(&attached.path))?;
+                if db::sqlite_worker::sqlite_ssh_worker_requested(&db_config) {
+                    let transport_layers = self.resolved_transport_layers(&db_config).await?;
+                    let worker = db::sqlite_worker::connect_sqlite_worker(
+                        &self.tunnels,
+                        &self.agent_manager,
+                        self.storage.data_dir(),
+                        connection_id,
+                        &db_config,
+                        &transport_layers,
+                    )
+                    .await?;
+                    PoolKind::Sqlite(db::sqlite::SqliteHandle::from_worker(worker))
+                } else {
+                    let sqlite_path = expand_tilde(&db_config.host);
+                    db::sqlite::validate_persistent_attachments(
+                        &sqlite_path,
+                        &db_config.password,
+                        !db_config.attached_databases.is_empty(),
+                    )?;
+                    let extensions =
+                        db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
+                            .into_iter()
+                            .map(|mut extension| {
+                                extension.path = expand_tilde(&extension.path);
+                                extension
+                            })
+                            .collect();
+                    let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
+                        &sqlite_path,
+                        &db_config.password,
+                        extensions,
+                    )
+                    .await?;
+                    for attached in &db_config.attached_databases {
+                        db::sqlite::attach_database(&pool, &attached.name, &expand_tilde(&attached.path))?;
+                    }
+                    PoolKind::Sqlite(pool)
                 }
-                PoolKind::Sqlite(pool)
             }
             DatabaseType::Rqlite => {
                 let client = db::rqlite_driver::RqliteClient::new(
@@ -2363,6 +2405,11 @@ impl AppState {
                 db::influxdb_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::InfluxDb(client)
             }
+            DatabaseType::InfluxDb3 => {
+                let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &db_config, connect_timeout)?;
+                db::influxdb3_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::InfluxDb3(client)
+            }
             DatabaseType::VictoriaMetrics => {
                 let client = db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(
                     &url,
@@ -2440,7 +2487,7 @@ impl AppState {
                             }
                         }
                     }
-                    let client = match initial_result {
+                    let mut client = match initial_result {
                         Ok(client) => client,
                         Err(err) => {
                             let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
@@ -2514,6 +2561,14 @@ impl AppState {
                             }
                         }
                     };
+                    if db_config.db_type == DatabaseType::Kingbase {
+                        let identifier_quote = client
+                            .connection_info(Some(agent_connect_timeout(&db_config)))
+                            .await
+                            .ok()
+                            .map(|info| info.identifier_quote);
+                        client.set_identifier_quote(identifier_quote);
+                    }
                     PoolKind::agent(client)
                 } else {
                     // ZooKeeper JVM properties are connection-scoped; shared agent daemons must not inherit them.
@@ -2788,13 +2843,41 @@ impl AppState {
         }
     }
 
+    /// Tests the enabled SSH chain without opening a database connection.
+    /// Layers before the final SSH hop are included because they may be
+    /// required to reach that hop; layers after it are unrelated to SSH auth.
+    pub async fn test_connection_ssh_tunnel(&self, config: &ConnectionConfig) -> Result<String, String> {
+        let resolved_layers = self.resolved_transport_layers(config).await?;
+        let test_layers = transport_layers_through_last_ssh(&resolved_layers)?;
+        let probe_id = format!("__connection_ssh_test__:{}", uuid::Uuid::new_v4());
+        let result = db::transport_layer_tunnel::start_transport_layers(
+            &probe_id,
+            test_layers,
+            "127.0.0.1",
+            1,
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await;
+        db::transport_layer_tunnel::stop_transport_layers(
+            &probe_id,
+            test_layers.len(),
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await;
+        result.map(|_| "SSH tunnel connection successful".to_string())
+    }
+
     pub async fn connection_host_port(
         &self,
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<(String, u16), String> {
         let transport_layers = self.resolved_transport_layers(config).await?;
-        if transport_layers.is_empty() {
+        if transport_layers.is_empty() || db::sqlite_worker::sqlite_ssh_worker_requested(config) {
             return Ok((config.host.clone(), config.port));
         }
         if config.uses_oracle_tns() {
@@ -3337,10 +3420,14 @@ impl AppState {
                     checked_mysql_pool = Some(pool.clone());
                     drop(connections);
                     match db::mysql::checkout_mysql_conn(&pool, HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT).await {
-                        // Pool saturation means active work, not a dead connection. Removing this pool would
-                        // start a competing reconnect while foreground queries and metadata are still running.
-                        Err(err) if err.is_pool_saturation() => {
-                            log::debug!("MySQL connection pool '{pool_key}' is busy; skipping health probe: {err}");
+                        // The 500 ms probe budget is intentionally shorter than a foreground checkout. A timeout
+                        // while waiting, creating, or recycling is inconclusive: slow remote handshakes and active
+                        // metadata exports can legitimately exceed it. Removing the pool here would start competing
+                        // reconnects while useful work is still running.
+                        Err(err @ db::PoolCheckoutError::Timeout { .. }) => {
+                            log::debug!(
+                                "MySQL connection pool '{pool_key}' did not finish a health checkout; keeping pool: {err}"
+                            );
                             false
                         }
                         Err(err) => {
@@ -3529,6 +3616,18 @@ impl AppState {
                         Ok(()) => false,
                         Err(err) => {
                             log::warn!("InfluxDB connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
+                PoolKind::InfluxDb3(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let timeout = crate::db::connection_timeout();
+                    match db::influxdb3_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("InfluxDB 3 connection pool '{pool_key}' is stale: {err}");
                             true
                         }
                     }
@@ -4275,6 +4374,9 @@ impl AppState {
         let source = {
             let connections = self.connections.read().await;
             match connections.get(&pool_key) {
+                Some(PoolKind::Agent(client)) if config.db_type == DatabaseType::MongoDb => {
+                    Some(ConnectionDatabaseInfoSource::MongoAgent(client.clone(), database.map(str::to_string)))
+                }
                 Some(PoolKind::Agent(client)) => Some(ConnectionDatabaseInfoSource::Agent(client.clone())),
                 Some(PoolKind::ExternalDriver { config, session, .. }) => {
                     Some(ConnectionDatabaseInfoSource::ExternalDriver {
@@ -4284,6 +4386,18 @@ impl AppState {
                 }
                 Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
                 Some(PoolKind::HBase(client)) => Some(ConnectionDatabaseInfoSource::NativeHBase(client.clone())),
+                Some(PoolKind::MongoDb(client)) => {
+                    Some(ConnectionDatabaseInfoSource::NativeMongo(client.clone(), database.map(str::to_string)))
+                }
+                Some(PoolKind::Meilisearch(client)) => Some(ConnectionDatabaseInfoSource::Meilisearch(client.clone())),
+                Some(PoolKind::VictoriaMetrics(client)) => {
+                    Some(ConnectionDatabaseInfoSource::VictoriaMetrics(client.clone()))
+                }
+                Some(PoolKind::Redis(_)) => Some(ConnectionDatabaseInfoSource::Redis(pool_key.clone())),
+                Some(PoolKind::Nacos) => Some(ConnectionDatabaseInfoSource::Nacos),
+                Some(PoolKind::Consul(client)) => Some(ConnectionDatabaseInfoSource::Consul(Box::new(client.clone()))),
+                #[cfg(feature = "mq-admin")]
+                Some(PoolKind::MessageQueue) => Some(ConnectionDatabaseInfoSource::MessageQueue),
                 _ => None,
             }
         };
@@ -4292,6 +4406,17 @@ impl AppState {
             Some(ConnectionDatabaseInfoSource::Agent(client)) => {
                 let mut agent = client.lock().await;
                 Ok(agent.connection_info(Some(db::connection_timeout())).await?.database_info)
+            }
+            Some(ConnectionDatabaseInfoSource::MongoAgent(client, database)) => {
+                let mut agent = client.lock().await;
+                let version = agent.mongo_server_version::<String>(database.as_deref().unwrap_or("admin")).await?;
+                Ok(Some(DatabaseConnectionInfo {
+                    product_name: Some("MongoDB".to_string()),
+                    product_version: Some(version),
+                    current_database: database,
+                    driver_name: Some("MongoDB legacy Agent".to_string()),
+                    ..Default::default()
+                }))
             }
             Some(ConnectionDatabaseInfoSource::ExternalDriver { config, session }) => {
                 let response = session
@@ -4308,6 +4433,41 @@ impl AppState {
             }
             Some(ConnectionDatabaseInfoSource::NativeHBase(client)) => {
                 db::hbase_driver::database_connection_info(&client).await
+            }
+            Some(ConnectionDatabaseInfoSource::NativeMongo(client, database)) => {
+                db::mongo_driver::database_connection_info(&client, database.as_deref()).await.map(Some)
+            }
+            Some(ConnectionDatabaseInfoSource::Meilisearch(client)) => {
+                db::meilisearch_driver::database_connection_info(&client).await.map(Some)
+            }
+            Some(ConnectionDatabaseInfoSource::VictoriaMetrics(client)) => {
+                db::victoriametrics_driver::database_connection_info(&client, db::connection_timeout()).await.map(Some)
+            }
+            Some(ConnectionDatabaseInfoSource::Redis(pool_key)) => {
+                let connections = self.connections.read().await;
+                match connections.get(&pool_key) {
+                    Some(PoolKind::Redis(redis)) => db::redis_driver::database_connection_info(redis).await.map(Some),
+                    _ => Ok(None),
+                }
+            }
+            Some(ConnectionDatabaseInfoSource::Nacos) => {
+                let admin_config = self.nacos_admin_config_for_connection(connection_id, &config).await?;
+                let admin = self.nacos_registry.get_or_build_config(connection_id, admin_config).await?;
+                Ok(crate::nacos::service::database_info_from_connection(&admin.test_connection().await?))
+            }
+            Some(ConnectionDatabaseInfoSource::Consul(client)) => {
+                let identity = client.agent_self().await?;
+                Ok(Some(DatabaseConnectionInfo {
+                    product_name: Some("Consul".to_string()),
+                    product_version: identity.version,
+                    server_comment: Some(format!("Agent {}", identity.node)),
+                    driver_name: Some("Consul HTTP API".to_string()),
+                    ..Default::default()
+                }))
+            }
+            #[cfg(feature = "mq-admin")]
+            Some(ConnectionDatabaseInfoSource::MessageQueue) => {
+                Ok(crate::mq::service::mq_database_connection_info(self, connection_id).await?)
             }
             None => Ok(None),
         }
@@ -4351,6 +4511,8 @@ impl AppState {
         self.tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         self.http_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
+        let sqlite_worker_prefix = db::sqlite_worker::sqlite_worker_chain_id(connection_id);
+        self.tunnels.stop_tunnels_with_prefix(&sqlite_worker_prefix).await;
         db::transport_layer_tunnel::stop_transport_layers(
             connection_id,
             layer_count,
@@ -4543,6 +4705,13 @@ impl AppState {
                     Ok(()) => true,
                     Err(e) => {
                         log::warn!("InfluxDB connection pool '{key}' is unhealthy: {e}");
+                        false
+                    }
+                },
+                PoolKind::InfluxDb3(client) => match db::influxdb3_driver::test_connection(client, timeout).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::warn!("InfluxDB 3 connection pool '{key}' is unhealthy: {e}");
                         false
                     }
                 },
@@ -4846,6 +5015,7 @@ enum KeepaliveTarget {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    InfluxDb3(db::influxdb3_driver::Influxdb3Client),
     VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
     #[cfg(feature = "mq-admin")]
@@ -4946,6 +5116,7 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
+        PoolKind::InfluxDb3(client) => Some(KeepaliveTarget::InfluxDb3(client.clone())),
         PoolKind::VictoriaMetrics(client) => Some(KeepaliveTarget::VictoriaMetrics(client.clone())),
         PoolKind::Agent(client) => Some(KeepaliveTarget::Agent(client.clone())),
         _ => None,
@@ -4992,6 +5163,9 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
         }
         KeepaliveTarget::InfluxDb(client) => {
             db::influxdb_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::InfluxDb3(client) => {
+            db::influxdb3_driver::test_connection(client, timeout).await.map_err(Into::into)
         }
         KeepaliveTarget::VictoriaMetrics(client) => {
             db::victoriametrics_driver::test_connection(client, timeout).await.map_err(Into::into)
@@ -5351,6 +5525,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
+        PoolKind::InfluxDb3(client) => PoolKind::InfluxDb3(client.clone()),
         PoolKind::VictoriaMetrics(client) => PoolKind::VictoriaMetrics(client.clone()),
         PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
         PoolKind::ExternalDriver { driver_id, config, session } => {
@@ -5383,7 +5558,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             let _ = p.disconnect().await;
         }
         PoolKind::Postgres(p) => p.close(),
-        PoolKind::Sqlite(_) => {}
+        PoolKind::Sqlite(pool) => {
+            pool.shutdown().await;
+        }
         PoolKind::Rqlite(_) => {}
         PoolKind::Turso(_) => {}
         PoolKind::CloudflareD1(_) => {}
@@ -5424,6 +5601,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             drop(client);
         }
         PoolKind::InfluxDb(client) => {
+            drop(client);
+        }
+        PoolKind::InfluxDb3(client) => {
             drop(client);
         }
         PoolKind::VictoriaMetrics(client) => {
@@ -5780,9 +5960,9 @@ mod tests {
         mysql_pool_setup_queries, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
         redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
         sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
-        task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
-        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        TxnConnection, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -5818,6 +5998,7 @@ mod tests {
             database: database.map(str::to_string),
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -6817,6 +6998,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn ssh_tunnel_test_includes_prerequisites_through_final_ssh_hop() {
+        let before = TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "before".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        });
+        let ssh = TransportLayerConfig::Ssh(ssh_layer("ssh", ""));
+        let after = TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "after".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Http,
+            host: "downstream.internal".to_string(),
+            port: 8080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        });
+        let layers = vec![before.clone(), ssh.clone(), after];
+
+        assert_eq!(transport_layers_through_last_ssh(&layers).unwrap(), &[before, ssh]);
+    }
+
+    #[test]
+    fn ssh_tunnel_test_rejects_chain_without_ssh() {
+        let layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        })];
+
+        assert_eq!(
+            transport_layers_through_last_ssh(&layers).unwrap_err(),
+            "Connection has no enabled SSH tunnel layer"
+        );
+    }
+
     #[tokio::test]
     async fn test_tunnel_profile_rejects_non_ssh_and_missing_host() {
         let (state, dir) = test_app_state().await;
@@ -6925,6 +7159,40 @@ mod tests {
         assert!(state.connections.read().await.contains_key("conn"));
         drop(held_connection);
         state.remove_connection_pools_detached("conn").await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mysql_health_check_keeps_pool_when_connection_creation_exceeds_probe_budget() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let pool_options =
+            mysql_async::PoolOpts::new().with_constraints(mysql_async::PoolConstraints::new(1, 2).unwrap());
+        let options = mysql_async::OptsBuilder::default()
+            .ip_or_hostname(address.ip().to_string())
+            .tcp_port(address.port())
+            .user(Some("fault-injection"))
+            .pass(Some("fault-injection"))
+            .pool_opts(Some(pool_options));
+        let pool = db::mysql::MySqlPool::new(options, 2);
+        let (state, dir) = test_app_state().await;
+        state.connections.write().await.insert("conn".to_string(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+
+        let started = Instant::now();
+        assert!(!state.remove_stale_connection_pool("conn").await);
+
+        assert!(started.elapsed() >= super::HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT);
+        assert!(matches!(
+            state.connections.read().await.get("conn"),
+            Some(PoolKind::Mysql(current, _)) if pool.is_same_pool(current)
+        ));
+        state.connections.write().await.remove("conn");
+        server.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(1), pool.disconnect()).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

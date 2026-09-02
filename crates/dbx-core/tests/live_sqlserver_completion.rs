@@ -35,6 +35,7 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         database: Some(database.to_string()),
         default_schema: None,
         visible_databases: None,
+        visible_database_patterns: None,
         visible_schemas: None,
         attached_databases: Vec::new(),
         init_script: None,
@@ -1006,6 +1007,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1203,6 +1205,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
     };
@@ -1373,6 +1376,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         objects: Vec::new(),
         mode: dbx_core::transfer::TransferMode::Append,
         target_table_name_case: dbx_core::transfer::TransferTableNameCase::Upper,
+        quote_target_column_names: true,
         ownership_policy: dbx_core::transfer::TransferOwnershipPolicy::Preserve,
         batch_size: 100,
     };

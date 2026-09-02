@@ -324,6 +324,12 @@ pub struct BuildDataGridCopyInsertStatementRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildDmlChangePreviewSqlRequest {
+    pub options: dbx_core::dml_preview_sql::DmlChangePreviewSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildDataGridContextFilterConditionRequest {
     pub options: dbx_core::data_grid_sql::DataGridContextFilterConditionOptions,
 }
@@ -725,7 +731,17 @@ pub async fn execute_script_with_2pc(
         req.destructive_confirmed.unwrap_or(false),
     )
     .await;
+    if schema_diff_deploy_may_have_changed_schema(&result) {
+        let prefix = super::schema::object_metadata_cache_prefix(&req.connection_id, &req.database);
+        if let Err(error) = state.app.storage.delete_schema_cache_prefix(&prefix).await {
+            tracing::warn!(connection_id = %req.connection_id, database = %req.database, %error, "failed to invalidate schema metadata cache after deploy");
+        }
+    }
     Ok(Json(result))
+}
+
+fn schema_diff_deploy_may_have_changed_schema(result: &dbx_core::query::SchemaDiffDeployResult) -> bool {
+    result.statement_count > 0 && matches!(result.status.as_str(), "committed" | "mixed")
 }
 
 pub async fn analyze_sql_references(
@@ -1058,6 +1074,14 @@ pub async fn build_data_grid_copy_insert_statement(
     Json(dbx_core::data_grid_sql::build_data_grid_copy_insert_statement(req.options))
 }
 
+pub async fn build_dml_change_preview_sql(
+    Json(req): Json<BuildDmlChangePreviewSqlRequest>,
+) -> Result<Json<dbx_core::dml_preview_sql::DmlChangePreviewSqlResult>, (axum::http::StatusCode, Json<String>)> {
+    dbx_core::dml_preview_sql::build_dml_change_preview_sql(req.options)
+        .map(Json)
+        .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, Json(message)))
+}
+
 pub async fn build_data_grid_context_filter_condition(
     Json(req): Json<BuildDataGridContextFilterConditionRequest>,
 ) -> Json<Option<String>> {
@@ -1156,6 +1180,28 @@ mod tests {
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         (state, dir)
+    }
+
+    fn deploy_result(status: &str, statement_count: usize) -> dbx_core::query::SchemaDiffDeployResult {
+        dbx_core::query::SchemaDiffDeployResult {
+            transaction_id: "deploy-test".to_string(),
+            status: status.to_string(),
+            participants: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            executed_count: 0,
+            statement_count,
+            error: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn schema_diff_cache_invalidation_covers_committed_and_partial_deploys() {
+        assert!(schema_diff_deploy_may_have_changed_schema(&deploy_result("committed", 1)));
+        assert!(schema_diff_deploy_may_have_changed_schema(&deploy_result("mixed", 1)));
+        assert!(!schema_diff_deploy_may_have_changed_schema(&deploy_result("rolled_back", 1)));
+        assert!(!schema_diff_deploy_may_have_changed_schema(&deploy_result("committed", 0)));
     }
 
     #[tokio::test]
@@ -1276,6 +1322,8 @@ mod tests {
                 "relation customer_orders does not exist",
             )),
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         };
 
         let response = execute_multi_response(vec![result], 17).unwrap();

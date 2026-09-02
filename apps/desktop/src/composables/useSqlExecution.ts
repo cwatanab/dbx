@@ -10,6 +10,7 @@ import { supportsConnectionScopedQueryExecution } from "@/lib/database/databaseF
 import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
+import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
@@ -19,6 +20,7 @@ import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlPa
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { assessProductionSql } from "@/lib/database/productionSafety";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
@@ -115,6 +117,7 @@ export function useSqlExecution(deps: {
   onMissingDatabase?: () => void;
   requestDangerConfirmation?: (request: SqlExecutionDangerRequest) => Promise<boolean>;
   onExecutionStarted?: (editorViewportRequestId: number) => void;
+  onExecutionCancelled?: (editorViewportRequestId: number) => void;
 }) {
   const { t } = useI18n();
   const queryStore = useQueryStore();
@@ -142,6 +145,10 @@ export function useSqlExecution(deps: {
   const pendingDangerEditorViewportRequestId = ref<number | undefined>();
   let pendingSqlParameterContinuation: ((sql: string, sourceOffset?: number) => Promise<void> | void) | undefined;
 
+  function cancelEditorViewportRequest(editorViewportRequestId?: number) {
+    if (editorViewportRequestId !== undefined) deps.onExecutionCancelled?.(editorViewportRequestId);
+  }
+
   async function resolvedExecutableSql(source?: SqlExecutionOverride): Promise<{ sql: string; sourceOffset?: number; editorViewportRequestId?: number }> {
     const atSetEnabled = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, deps.activeConnection.value?.db_type, settingsStore.editorSettings.sqlVariableSubstitutionEnabled).atSet;
     const databaseType = effectiveDatabaseTypeForConnection(deps.activeConnection.value) ?? deps.activeConnection.value?.db_type;
@@ -162,9 +169,13 @@ export function useSqlExecution(deps: {
     const tab = deps.activeTab.value;
     const { sql, sourceOffset, editorViewportRequestId } = await resolvedExecutableSql(sqlOverride);
     const executionOptions = { ...options, editorViewportRequestId };
-    if (!tab || !sql.trim()) return;
+    if (!tab || !sql.trim()) {
+      cancelEditorViewportRequest(editorViewportRequestId);
+      return;
+    }
     if (requiresDatabaseSelection(tab, deps.activeConnection.value, sql)) {
       deps.onMissingDatabase?.();
+      cancelEditorViewportRequest(editorViewportRequestId);
       return;
     }
     if (supportsSqlTemplateParameters(deps.activeConnection.value, sql) && prepareSqlParameterDialog(sql, sourceOffset, executionOptions)) return;
@@ -176,6 +187,10 @@ export function useSqlExecution(deps: {
   }
 
   async function continueExecute(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
+    if (!(await ensureReadOnlyWriteAccess({ connection: deps.activeConnection.value, sql, source: t("production.sourceSqlEditor") }))) {
+      cancelEditorViewportRequest(options.editorViewportRequestId);
+      return;
+    }
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
       const commands = sql
@@ -195,6 +210,7 @@ export function useSqlExecution(deps: {
       }
       if (highestSafety === "blocked") {
         toast(t("redis.blockedCommand", { command: "Redis" }), 5000);
+        cancelEditorViewportRequest(options.editorViewportRequestId);
         return;
       }
       if (highestSafety === "confirm") {
@@ -220,6 +236,7 @@ export function useSqlExecution(deps: {
         source: t("production.sourceSqlEditor"),
       });
       if (confirmed) await doExecute(sql, sourceOffset, options);
+      else cancelEditorViewportRequest(options.editorViewportRequestId);
       return;
     }
     if (isDangerousSql(sql, deps.activeConnection.value?.db_type) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
@@ -281,17 +298,23 @@ export function useSqlExecution(deps: {
   }
 
   async function doExecute(sql?: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
-    if (sql === undefined) ({ sql, sourceOffset } = await resolvedExecutableSql());
+    if (sql === undefined) {
+      ({ sql, sourceOffset } = await resolvedExecutableSql());
+    }
     const tab = deps.activeTab.value;
-    if (!tab || !sql.trim()) return;
+    if (!tab || !sql.trim()) {
+      cancelEditorViewportRequest(options.editorViewportRequestId);
+      return;
+    }
     const executionConnection = connectionStore.getConfig(tab.connectionId) ?? deps.activeConnection.value;
     const executionDatabaseType = executionConnection?.db_type;
     if (requiresDatabaseSelection(tab, executionConnection, sql)) {
       deps.onMissingDatabase?.();
+      cancelEditorViewportRequest(options.editorViewportRequestId);
       return;
     }
     const statementCount = splitSqlStatementRanges(sql, executionDatabaseType).length;
-    deps.activeOutputView.value = statementCount > 1 ? "summary" : "result";
+    deps.activeOutputView.value = statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : "result";
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
@@ -301,7 +324,10 @@ export function useSqlExecution(deps: {
       ...(options.openInNewResultTab ? { openInNewResultTab: true } : {}),
       ...(options.editorViewportRequestId !== undefined ? { onExecutionStarted: () => deps.onExecutionStarted?.(options.editorViewportRequestId!) } : {}),
     });
-    if (producedResult === false) return;
+    if (producedResult === false) {
+      cancelEditorViewportRequest(options.editorViewportRequestId);
+      return;
+    }
     const executionTabStillActive = deps.activeTab.value?.id === tab.id;
     const sqlServerMessageResultIndex = executionDatabaseType === "sqlserver" ? tab.results?.findIndex((result) => result.server_message === true) : undefined;
     if (sqlServerMessageResultIndex !== undefined && sqlServerMessageResultIndex >= 0) {
@@ -331,8 +357,10 @@ export function useSqlExecution(deps: {
       const refreshTarget = sqlMetadataRefreshTarget(sql, tab.schema);
       if (refreshTarget.scope === "connection") {
         connectionStore.invalidateMetadataCache(tab.connectionId);
+        await invalidateObjectMetadataCache({ connectionId: tab.connectionId });
         await connectionStore.loadDatabases(tab.connectionId, { force: true });
       } else if (refreshTarget.scope === "database") {
+        await invalidateObjectMetadataCache({ connectionId: tab.connectionId, database: tab.database, schema: refreshTarget.schema });
         await connectionStore.refreshObjectListTreeNode(tab.connectionId, tab.database, refreshTarget.schema);
       }
     }
@@ -358,6 +386,9 @@ export function useSqlExecution(deps: {
     const tabCancelRequested = (count: number) => (tab.cancelRequestCount ?? 0) !== count;
     if (cancelRequested()) return finish({ status: "cancelled" });
     if (!sql.trim()) return finish({ status: "failed", errorMessage: t("explain.emptySql") });
+    if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceMultiDbSql") }))) {
+      return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
+    }
     if (requiresDatabaseSelection(executionTab, connection, sql)) {
       return finish({ status: "failed", errorMessage: t("editor.selectDatabaseRequired") });
     }
@@ -473,8 +504,10 @@ export function useSqlExecution(deps: {
         const refreshTarget = sqlMetadataRefreshTarget(sql, executionTab.schema);
         if (refreshTarget.scope === "connection") {
           connectionStore.invalidateMetadataCache(executionTab.connectionId);
+          await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId });
           await connectionStore.loadDatabases(executionTab.connectionId, { force: true });
         } else if (refreshTarget.scope === "database") {
+          await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId, database: executionTab.database, schema: refreshTarget.schema });
           await connectionStore.refreshObjectListTreeNode(executionTab.connectionId, executionTab.database, refreshTarget.schema);
         }
       }
@@ -544,6 +577,10 @@ export function useSqlExecution(deps: {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
+    if (!(await ensureReadOnlyWriteAccess({ connection: deps.activeConnection.value, sql, source: t("production.sourceSqlEditor") }))) {
+      cancelEditorViewportRequest(editorViewportRequestId);
+      return;
+    }
     await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId });
   }
 
@@ -567,6 +604,7 @@ export function useSqlExecution(deps: {
 
   watch(showSqlParameterDialog, (open) => {
     if (open) return;
+    const editorViewportRequestId = pendingSqlParameterEditorViewportRequestId.value;
     sqlParameterSourceSql.value = "";
     sqlParameterNames.value = [];
     sqlParameterDatabaseType.value = undefined;
@@ -575,16 +613,19 @@ export function useSqlExecution(deps: {
     pendingOpenInNewResultTab.value = false;
     pendingSqlParameterEditorViewportRequestId.value = undefined;
     pendingSqlParameterContinuation = undefined;
+    cancelEditorViewportRequest(editorViewportRequestId);
   });
 
   watch(showDangerDialog, (open) => {
     if (open) return;
+    const editorViewportRequestId = pendingDangerEditorViewportRequestId.value;
     pendingDangerSql.value = "";
     pendingDangerSourceOffset.value = undefined;
     pendingDangerKind.value = "sql";
     pendingOpenInNewResultTab.value = false;
     pendingDangerEditorViewportRequestId.value = undefined;
     suppressDangerConfirm.value = false;
+    cancelEditorViewportRequest(editorViewportRequestId);
   });
 
   return {

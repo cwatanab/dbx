@@ -64,6 +64,7 @@ import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/l
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 import { redisKeyRawToText, redisKeyTextToDisplay, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
+import { formatBytes } from "@/lib/database/serverMetrics";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -173,6 +174,10 @@ const selectedMemberContext = ref<RedisMemberContext | null>(null);
 const isEditingMember = ref(false);
 const savingMember = ref(false);
 const memberEditValue = ref("");
+const memberFieldEditValue = ref("");
+// Keep the original hash field separate from the editable draft so a rename
+// remains visible (and protected from refresh) after the detail dialog closes.
+const memberFieldDraftBaseline = ref("");
 const editingZsetMemberKey = ref<string | null>(null);
 const savingZsetMember = ref(false);
 const zsetInlineMember = ref("");
@@ -435,6 +440,7 @@ const stringBlob = computed<RedisBlob | null>(() => {
   if (!value) return null;
   return value.data.kind === "string" ? value.data.content : null;
 });
+const isStringValueTruncated = computed(() => data.value?.data.kind === "string" && Boolean(data.value.data.truncated));
 const stringValueDetail = computed(() => (stringBlob.value ? formatRedisMemberDetail(stringBlob.value, { allowJsonText: true }) : null));
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value, { allowJsonText: true }));
 
@@ -565,7 +571,7 @@ const memberCopyText = computed(() => memberDecodedText.value ?? detailTextForFo
 const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
-const canEditCurrentStringFormat = computed(() => Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
+const canEditCurrentStringFormat = computed(() => !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
 const showStringEditActions = computed(() => canEditCurrentStringFormat.value);
 const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
 const stringJsonRawBaseline = ref("");
@@ -590,17 +596,22 @@ const hasRetainedStringDraft = computed(() => isStringDraftDirty(stringDraftForm
 const redisJsonValueChanged = computed(() => data.value?.data.kind === "json" && editValue.value !== redisJsonDraftBaseline.value);
 const canEditCurrentMemberFormat = computed(() => selectedMemberCanEdit.value && memberValueView.value === "utf8");
 const isEditingHashJson = computed(() => selectedMemberContext.value?.kind === "hash" && selectedMemberCanEdit.value && memberValueView.value === "json" && Boolean(selectedMemberDetail.value.json));
+const memberFieldChanged = computed(() => {
+  const context = selectedMemberContext.value;
+  return context?.kind === "hash" && context.canEdit && memberFieldEditValue.value !== memberFieldDraftBaseline.value;
+});
 const memberValueChanged = computed(() => {
   if (!selectedMemberCanEdit.value) return false;
   const original = selectedMemberDetail.value.rawText;
-  if (isEditingHashJson.value && selectedMemberDetail.value.json) return memberEditValue.value !== memberJsonDraftBaseline.value;
-  return memberEditValue.value !== original;
+  const valueChanged = isEditingHashJson.value && selectedMemberDetail.value.json ? memberEditValue.value !== memberJsonDraftBaseline.value : memberEditValue.value !== original;
+  return valueChanged || memberFieldChanged.value;
 });
 // A member sheet can close without discarding its draft, so its dirty state
 // must outlive the sheet and whichever display format is currently selected.
 const memberDraftFormat = ref<"utf8" | "json" | null>(null);
 const hasRetainedMemberDraft = computed(() => {
   const format = memberDraftFormat.value;
+  if (memberFieldChanged.value) return true;
   if (!format || !selectedMemberCanEdit.value) return false;
 
   const original = selectedMemberDetail.value.rawText;
@@ -609,7 +620,7 @@ const hasRetainedMemberDraft = computed(() => {
   }
   return memberEditValue.value !== original;
 });
-const hasUnsavedRedisDraft = computed(() => hasRetainedStringDraft.value || redisJsonValueChanged.value || hasRetainedMemberDraft.value || editingZsetMemberKey.value !== null || showHashFieldTtlDialog.value);
+const hasUnsavedRedisDraft = computed(() => hasRetainedStringDraft.value || redisJsonValueChanged.value || hasRetainedMemberDraft.value || memberFieldChanged.value || editingZsetMemberKey.value !== null || showHashFieldTtlDialog.value);
 const hasMore = computed(() => scanCursor.value != null && scanCursor.value > 0);
 const collectionTotal = computed(() => (data.value ? redisValueCollectionTotal(data.value) : null));
 const hashFieldTtlSupported = computed(() => {
@@ -623,14 +634,25 @@ const zsetGridStyle = computed(() => ({
   gridTemplateColumns: `60px ${zsetScoreWidth.value}px minmax(0, 1fr) 104px`,
 }));
 const metadataSizeLabel = computed(() => {
+  if (data.value?.data.kind === "string" && data.value.data.total_bytes != null) {
+    return formatBytes(data.value.data.total_bytes);
+  }
   const metadata = props.metadata;
   const size = metadata?.size ?? 0;
   if (!metadata || size <= 0) return "";
   if (metadata.key_type === "string") {
-    if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
-    return `${size} B`;
+    return formatBytes(size);
   }
   return String(size);
+});
+const largeStringPreviewHint = computed(() => {
+  const value = data.value;
+  const loaded = stringValueDetail.value?.byteCount ?? 0;
+  if (!value || value.data.kind !== "string" || !value.data.truncated) return "";
+  if (value.data.total_bytes != null) {
+    return t("redis.largeStringPreviewHint", { loaded: formatBytes(loaded), total: formatBytes(value.data.total_bytes) });
+  }
+  return t("redis.largeStringPreviewHintUnknown", { loaded: formatBytes(loaded) });
 });
 const streamRows = computed<RedisStreamRow[]>(() => {
   if (redisKind.value !== "stream") return [];
@@ -1296,6 +1318,7 @@ function setStringValueFormat(format: RedisValueFormat) {
 }
 
 function setStringValueCodec(codec: RedisValueCodec) {
+  if (isStringValueTruncated.value && codec !== "none") return;
   stringValueCodec.value = codec;
   rememberRedisValueCodec(codec);
 }
@@ -1529,6 +1552,7 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
     }
 
     if (loadedValue.data.kind === "string") {
+      if (loadedValue.data.truncated) stringValueCodec.value = "none";
       const detail = formatRedisMemberDetail(loadedValue.data.content, { allowJsonText: true });
       stringValueView.value = preferredRedisValueFormat(loadedValue.data.content, readPreferredRedisValueFormat(), { allowJsonText: true });
       stringJsonRawBaseline.value = detail.json?.formattedText ?? "";
@@ -1582,7 +1606,7 @@ async function loadMore() {
 }
 
 async function saveString() {
-  if (!data.value || !stringBlob.value || isBinaryStringValue.value || !stringValueChanged.value || savingString.value) return;
+  if (!data.value || !stringBlob.value || isStringValueTruncated.value || isBinaryStringValue.value || !stringValueChanged.value || savingString.value) return;
 
   let value = editValue.value;
   // Compact whenever this draft is/was JSON-edited, even if the user switched tabs before Save.
@@ -1686,6 +1710,10 @@ async function renameKey() {
 
 async function copyValue() {
   if (!data.value) return;
+  if (isStringValueTruncated.value) {
+    toast(t("redis.largeStringPreviewActionUnavailable"), 3000);
+    return;
+  }
   // Copy the decoded text while a codec is decoding the string value.
   if (stringValueCodec.value !== "none" && stringDecodedText.value != null) {
     await copyText(stringDecodedText.value);
@@ -1796,6 +1824,10 @@ function generateInsertStatements(): string | null {
 }
 
 async function copyInsertStatement() {
+  if (isStringValueTruncated.value) {
+    toast(t("redis.largeStringPreviewActionUnavailable"), 3000);
+    return;
+  }
   const stmt = generateInsertStatements();
   if (!stmt) {
     toast(t("redis.copyInsertStatementBinary"), 3000);
@@ -1824,6 +1856,8 @@ function selectMember(title: string, value: unknown, context: RedisMemberContext
   memberJsonRawBaseline.value = detail.json?.formattedText ?? "";
   memberJsonDraftBaseline.value = jsonDraftBaseline(memberJsonRawBaseline.value, redisJsonDecoded.value);
   memberEditValue.value = memberValueView.value === "json" && detail.json ? memberJsonDraftBaseline.value : detail.rawText;
+  memberFieldDraftBaseline.value = context.kind === "hash" ? (context.field ?? "") : "";
+  memberFieldEditValue.value = memberFieldDraftBaseline.value;
   memberDraftFormat.value = context.kind === "hash" && context.canEdit && memberValueView.value === "json" && detail.json ? "json" : null;
 }
 
@@ -1834,6 +1868,8 @@ function clearSelectedMember() {
   selectedMemberContext.value = null;
   isEditingMember.value = false;
   memberEditValue.value = "";
+  memberFieldEditValue.value = "";
+  memberFieldDraftBaseline.value = "";
   memberJsonDraftBaseline.value = "";
   memberDraftFormat.value = null;
 }
@@ -1857,7 +1893,9 @@ function viewMember(title: string, value: unknown, context: RedisMemberContext, 
 
 function handleMemberDetailOpenChange(open: boolean) {
   showMemberDetail.value = open;
-  if (!open) isEditingMember.value = false;
+  if (!open) {
+    isEditingMember.value = false;
+  }
 }
 
 function finishMemberDetailClose() {
@@ -1988,6 +2026,11 @@ function startEditMember() {
   if (!memberValueChanged.value) memberEditValue.value = selectedMemberDetail.value.rawText;
   // Do not demote a retained JSON draft to utf8; save still needs compact normalization.
   if (memberDraftFormat.value !== "json") memberDraftFormat.value = "utf8";
+  // A closed dialog can be reopened into the same edit. Keep a dirty field
+  // draft instead of replacing it with the currently stored field name.
+  if (selectedMemberContext.value?.kind === "hash" && !memberFieldChanged.value) {
+    memberFieldEditValue.value = selectedMemberContext.value.field ?? "";
+  }
   isEditingMember.value = true;
   nextTick(() => memberTextareaRef.value?.focus());
 }
@@ -1996,6 +2039,7 @@ function cancelEditMember() {
   memberEditValue.value = selectedMemberDetail.value.rawText;
   memberDraftFormat.value = null;
   isEditingMember.value = false;
+  memberFieldEditValue.value = memberFieldDraftBaseline.value;
 }
 
 function discardHashJsonEdit() {
@@ -2020,13 +2064,24 @@ async function saveMemberEdit() {
   }
 
   let nextContext: RedisMemberContext = context;
+  const nextHashField = context.kind === "hash" ? memberFieldEditValue.value : "";
+  if (context.kind === "hash" && nextHashField.length === 0) {
+    toast(t("redis.fieldRequired"), 3000);
+    return;
+  }
   savingMember.value = true;
   try {
     if (context.kind === "list") {
       await api.redisListSet(props.connectionId, props.db, props.keyRaw, context.index, writeValue);
     } else if (context.kind === "hash") {
-      if (!context.field) return;
-      await api.redisHashSet(props.connectionId, props.db, props.keyRaw, context.field, writeValue);
+      if (context.field == null) return;
+      try {
+        await api.redisHashFieldUpdate(props.connectionId, props.db, props.keyRaw, context.field, nextHashField, writeValue);
+      } catch (error) {
+        toast(errorMessage(error), 3000);
+        return;
+      }
+      nextContext = { kind: "hash", field: nextHashField, canEdit: canEditRedisMemberDetail("hash", writeValue) };
     } else if (context.kind === "set") {
       if (!context.member) return;
       await api.redisSetRemove(props.connectionId, props.db, props.keyRaw, context.member);
@@ -2149,7 +2204,7 @@ function resolveSelectedMember(context: RedisMemberContext): { title: string; va
       };
     }
     case "hash": {
-      if (redisKind.value !== "hash" || !context.field) return null;
+      if (redisKind.value !== "hash" || context.field == null) return null;
       const item = (collectionItems.value as RedisHashItem[]).find((candidate) => redisBlobText(candidate.field) === context.field);
       if (!item) return null;
       const field = redisBlobText(item.field);
@@ -2702,8 +2757,10 @@ defineExpose({ focusSearch });
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"><ClipboardCopy class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"
+            ><ClipboardCopy class="h-3.5 w-3.5"
+          /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.renameKey')" :aria-label="t('redis.renameKey')" @click="openRenameKeyDialog"><Pencil class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
         </div>
@@ -2742,11 +2799,21 @@ defineExpose({ focusSearch });
         <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
           <span class="shrink-0 text-muted-foreground">{{ t("redis.codecRowLabel") }}</span>
           <div class="flex max-w-full overflow-x-auto rounded-md border bg-muted/20 p-0.5">
-            <Button v-for="codec in REDIS_VALUE_CODEC_ORDER" :key="codec" variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': stringValueCodec === codec }" @click="setStringValueCodec(codec)">
+            <Button
+              v-for="codec in REDIS_VALUE_CODEC_ORDER"
+              :key="codec"
+              variant="ghost"
+              size="sm"
+              class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
+              :class="{ 'bg-background shadow-sm': stringValueCodec === codec }"
+              :disabled="isStringValueTruncated && codec !== 'none'"
+              :title="isStringValueTruncated && codec !== 'none' ? t('redis.largeStringPreviewActionUnavailable') : undefined"
+              @click="setStringValueCodec(codec)"
+            >
               {{ redisCodecLabel(codec) }}
             </Button>
           </div>
-          <FileArchive v-if="stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
+          <FileArchive v-if="!isStringValueTruncated && stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
           <span class="flex-1" />
           <label v-if="isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec)" class="flex items-center gap-1.5 text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
@@ -2788,11 +2855,11 @@ defineExpose({ focusSearch });
           @save="saveString"
         />
         <div v-else-if="activeStructuredStringDetail && stringValueView !== 'hex' && stringValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree v-if="stringValueView === 'json'" :value="activeStructuredStringDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+          <JsonTree v-if="stringValueView === 'json'" :value="activeStructuredStringDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
           <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ stringDecodedText }}</pre>
         </div>
         <div v-else-if="stringValueCodec === 'base64' && stringBase64Detail" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree v-if="stringValueView === 'json' && stringBase64Detail.json" :value="stringBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+          <JsonTree v-if="stringValueView === 'json' && stringBase64Detail.json" :value="stringBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
           <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ stringDecodedText }}</pre>
         </div>
         <div v-else-if="stringCodecMismatch" class="min-h-0 flex-1 flex flex-col overflow-hidden">
@@ -2816,8 +2883,8 @@ defineExpose({ focusSearch });
             {{ t("redis.decompressedLoading") }}
           </div>
           <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
-            <div v-if="stringValueView === 'json' && decompressedJsonDetail" class="p-4">
-              <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <div v-if="stringValueView === 'json' && decompressedJsonDetail" class="h-full p-4">
+              <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
             </div>
             <pre v-else class="w-full min-w-0 max-w-full p-4 text-sm leading-6" :class="detailTextClass('utf8')">{{ stringDecodedText }}</pre>
           </div>
@@ -2850,7 +2917,11 @@ defineExpose({ focusSearch });
         />
         <pre v-else-if="canHighlightStringSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)" v-html="contentSearchHighlightedHtml" />
         <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
-        <div v-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
+        <div v-if="isStringValueTruncated" data-redis-large-string-preview class="flex shrink-0 items-center gap-2 border-t bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
+          <Eye class="h-3.5 w-3.5 shrink-0" />
+          <span>{{ largeStringPreviewHint }}</span>
+        </div>
+        <div v-else-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
           {{ t("redis.binaryStringReadonlyHint") }}
         </div>
         <div v-if="showStringEditActions" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
@@ -3480,7 +3551,8 @@ defineExpose({ focusSearch });
         />
         <DialogHeader class="border-b px-5 py-4 pr-12">
           <DialogTitle class="flex items-center gap-2">
-            <span class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
+            <Input v-if="isEditingMember && selectedMemberContext?.kind === 'hash'" v-model="memberFieldEditValue" class="h-7 min-w-0 flex-1 text-sm" :placeholder="t('redis.field')" :aria-label="t('redis.field')" @keydown.enter="saveMemberEdit" />
+            <span v-else class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
             <Badge variant="outline" class="shrink-0 text-xs">{{ redisFormatLabel(memberValueView, selectedMemberDetail.rawLabel) }}</Badge>
             <Badge v-if="memberGzipBadge && memberValueCodec === 'none'" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')">
               <FileArchive class="h-3 w-3 mr-1" />
@@ -3530,14 +3602,14 @@ defineExpose({ focusSearch });
           </div>
           <RedisJsonEditor v-if="isEditingHashJson" ref="memberJsonEditorRef" v-model="memberEditValue" class="min-h-0 flex-1" :save-disabled="savingMember || !memberValueChanged" :read-only="savingMember" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveMemberEdit" />
           <div v-else-if="memberValueView === 'json' && selectedMemberDetail.json && memberValueCodec === 'none'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <JsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
           </div>
           <div v-else-if="activeStructuredMemberDetail && memberValueView !== 'hex' && memberValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree v-if="memberValueView === 'json'" :value="activeStructuredMemberDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <JsonTree v-if="memberValueView === 'json'" :value="activeStructuredMemberDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
             <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ memberDecodedText }}</pre>
           </div>
           <div v-else-if="memberValueCodec === 'base64' && memberBase64Detail" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree v-if="memberValueView === 'json' && memberBase64Detail.json" :value="memberBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+            <JsonTree v-if="memberValueView === 'json' && memberBase64Detail.json" :value="memberBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
             <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ memberDecodedText }}</pre>
           </div>
           <div v-else-if="memberCodecMismatch" class="min-h-0 flex-1 flex flex-col overflow-hidden">
@@ -3561,8 +3633,8 @@ defineExpose({ focusSearch });
               {{ t("redis.decompressedLoading") }}
             </div>
             <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
-              <div v-if="memberValueView === 'json' && decompressedJsonDetail" class="p-5">
-                <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
+              <div v-if="memberValueView === 'json' && decompressedJsonDetail" class="h-full p-5">
+                <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
               </div>
               <pre v-else class="w-full min-w-0 max-w-full p-5 text-[13px] leading-6" :class="detailTextClass('utf8')">{{ memberDecodedText }}</pre>
             </div>
@@ -3596,7 +3668,7 @@ defineExpose({ focusSearch });
             <Button variant="ghost" :disabled="savingMember" @click="cancelEditMember">
               {{ t("grid.discard") }}
             </Button>
-            <Button :disabled="savingMember" @click="saveMemberEdit">
+            <Button :disabled="savingMember || !memberValueChanged" @click="saveMemberEdit">
               <Loader2 v-if="savingMember" class="h-4 w-4 animate-spin" />
               <Save v-else class="h-4 w-4" />
               {{ t("grid.save") }}

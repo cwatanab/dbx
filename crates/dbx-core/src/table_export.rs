@@ -68,6 +68,8 @@ pub struct TableExportRequest {
     pub numeric_column_right_align: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_comments: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -503,6 +505,13 @@ enum TableExportCursorKind {
     ExternalDriver,
 }
 
+fn table_export_cursor_allowed(database_type: DatabaseType, cursor_kind: TableExportCursorKind) -> bool {
+    // HighGo's JDBC driver may materialize the complete unbounded result before
+    // startTableRead can return its first cursor page. Use the existing bounded
+    // keyset/LIMIT-OFFSET table export path instead.
+    database_type != DatabaseType::Highgo || cursor_kind != TableExportCursorKind::Agent
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TableExportCursorSession {
     Agent(String),
@@ -650,7 +659,10 @@ async fn fetch_table_export_batch(
     }
 
     if !*table_read_attempted {
-        match table_export_cursor_kind(state, pool_key).await {
+        let cursor_kind = table_export_cursor_kind(state, pool_key)
+            .await
+            .filter(|cursor_kind| table_export_cursor_allowed(*db_type, *cursor_kind));
+        match cursor_kind {
             Some(TableExportCursorKind::Agent) => {
                 *table_read_attempted = true;
                 let sql = table_cursor_sql(request, sql_context, query_col_names, column_types, primary_keys);
@@ -1050,6 +1062,7 @@ async fn try_export_native_table_stream(
                 &[],
                 request.date_time_format.as_deref(),
                 request.numeric_column_right_align,
+                request.auto_filter.unwrap_or(true),
             )?;
             let result = stream_native_table_rows(
                 state,
@@ -1705,6 +1718,7 @@ async fn export_table_data_core_inner(
                 &[],
                 request.date_time_format.as_deref(),
                 request.numeric_column_right_align,
+                request.auto_filter.unwrap_or(true),
             )?;
 
             loop {
@@ -2200,6 +2214,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
 
         ExternalDriverExportFixture { state, request, calls, output, dir }
@@ -2344,6 +2359,13 @@ mod tests {
     }
 
     #[test]
+    fn highgo_table_export_avoids_unbounded_agent_cursor() {
+        assert!(!table_export_cursor_allowed(DatabaseType::Highgo, TableExportCursorKind::Agent));
+        assert!(table_export_cursor_allowed(DatabaseType::Highgo, TableExportCursorKind::ExternalDriver));
+        assert!(table_export_cursor_allowed(DatabaseType::Oracle, TableExportCursorKind::Agent));
+    }
+
+    #[test]
     fn export_batch_size_respects_row_limit_remaining_rows() {
         assert_eq!(next_export_batch_size(None, 12_000, 10_000), Some(10_000));
         assert_eq!(next_export_batch_size(Some(15_000), 0, 10_000), Some(10_000));
@@ -2373,6 +2395,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["Time".to_string(), "root.test.device2.temperature".to_string()];
@@ -2428,6 +2451,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["tImE".to_string(), "temperature".to_string()];
@@ -2461,6 +2485,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let error = table_export_query_columns(&request, &context, &["TIME".to_string()]).unwrap_err();
@@ -2489,6 +2514,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec![
@@ -2525,6 +2551,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["Time".to_string(), "value".to_string()];
 
@@ -2573,6 +2600,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
 
@@ -2615,6 +2643,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["id".to_string(), "payload".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -2685,6 +2714,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["id".to_string(), "DisplayName".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -2737,6 +2767,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let columns = vec!["id".to_string(), "geom".to_string(), "name".to_string()];
         let column_types = vec![Some("int".to_string()), Some("geometry".to_string()), Some("varchar".to_string())];
@@ -2791,6 +2822,7 @@ mod tests {
             date_time_format: None,
             numeric_column_right_align: false,
             column_comments: None,
+            auto_filter: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
         let sql = table_cursor_sql(&request, &context, &columns, &[], &primary_keys);
@@ -2973,8 +3005,26 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn external_driver_table_export_closes_cursor_after_fetch_error() {
+    #[test]
+    fn external_driver_table_export_closes_cursor_after_fetch_error() {
+        let handle = std::thread::Builder::new()
+            .name("table-export-fetch-error".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build table export fetch error test runtime")
+                    .block_on(run_external_driver_table_export_closes_cursor_after_fetch_error());
+            })
+            .expect("spawn table export fetch error test thread");
+        if let Err(panic) = handle.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[cfg(unix)]
+    async fn run_external_driver_table_export_closes_cursor_after_fetch_error() {
         let fixture = external_driver_export_fixture(
             r#"  case "$line" in
     *'"method":"executeQueryPage"'*)
