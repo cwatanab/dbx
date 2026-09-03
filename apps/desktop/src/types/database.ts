@@ -1072,6 +1072,10 @@ export interface TableStructureEditorTarget {
 export interface TableStructureEditorDraft {
   dirty?: boolean;
   activeTab: TableInfoTab;
+  /** DDL as loaded from the database — the baseline `ddlDraft` is compared against. */
+  ddlContent?: string;
+  /** Edited DDL script, or null/undefined when the DDL tab was left untouched. */
+  ddlDraft?: string | null;
   newTableName: string;
   tableComment: string;
   originalTableComment: string;
@@ -1103,6 +1107,15 @@ export type ObjectBrowserViewMode = "list" | "grid";
 export interface ObjectBrowserViewport {
   scrollTop: number;
   viewMode: ObjectBrowserViewMode;
+}
+
+/** Runtime-only viewport state for the selected configuration in a Nacos tab. */
+export interface NacosConfigEditorViewport {
+  namespace: string;
+  dataId: string;
+  group: string;
+  scrollTop: number;
+  scrollLeft: number;
 }
 
 export interface ExternalSqlFileVersion {
@@ -1253,6 +1266,7 @@ export interface QueryTab {
   nacosTargetGroup?: string;
   nacosTargetKeyword?: string;
   nacosTargetRequestId?: number;
+  nacosConfigEditorViewport?: NacosConfigEditorViewport;
   structureTableName?: string;
   structureInitialTab?: TableInfoTab;
   structureInitialTabRequestId?: number;

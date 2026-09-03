@@ -3,7 +3,7 @@ use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -68,6 +68,7 @@ pub enum AiProvider {
     Openai,
     Gemini,
     Deepseek,
+    Kimi,
     Qwen,
     MiniMax,
     Ollama,
@@ -100,6 +101,7 @@ impl AiProvider {
             AiProvider::Openai => "openai",
             AiProvider::Gemini => "gemini",
             AiProvider::Deepseek => "deepseek",
+            AiProvider::Kimi => "kimi",
             AiProvider::Qwen => "qwen",
             AiProvider::MiniMax => "minimax",
             AiProvider::Ollama => "ollama",
@@ -311,6 +313,14 @@ pub struct AiChatSelectionState {
     pub effort_preferences: Vec<AiModelEffortPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<AiAssistantMode>,
+    /// Prompt template ids auto-applied when the AI panel opens, keyed by
+    /// connection db_type. BTreeMap keeps serialized key order stable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub default_templates_by_db_type: BTreeMap<String, Vec<String>>,
+    /// Prompt template ids from the most recent send, keyed by connection
+    /// db_type; used as fallback when no defaults are configured.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_used_templates_by_db_type: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for AiChatSelectionState {
@@ -320,6 +330,8 @@ impl Default for AiChatSelectionState {
             active: None,
             effort_preferences: Vec::new(),
             default_mode: None,
+            default_templates_by_db_type: BTreeMap::new(),
+            last_used_templates_by_db_type: BTreeMap::new(),
         }
     }
 }
@@ -794,6 +806,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
     match config.provider {
         AiProvider::Openai
         | AiProvider::Deepseek
+        | AiProvider::Kimi
         | AiProvider::Qwen
         | AiProvider::MiniMax
         | AiProvider::Ollama
@@ -1548,6 +1561,7 @@ fn provider_requires_api_key(provider: &AiProvider) -> bool {
             | AiProvider::Openai
             | AiProvider::Gemini
             | AiProvider::Deepseek
+            | AiProvider::Kimi
             | AiProvider::Qwen
             | AiProvider::MiniMax
     )
@@ -2022,6 +2036,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                 }
                 AiProvider::Openai
                 | AiProvider::Deepseek
+                | AiProvider::Kimi
                 | AiProvider::Qwen
                 | AiProvider::MiniMax
                 | AiProvider::OpenaiCompatible => list_openai_compatible_models(&client, config).await?,
@@ -3057,6 +3072,7 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
                 }
                 AiProvider::Openai
                 | AiProvider::Deepseek
+                | AiProvider::Kimi
                 | AiProvider::Qwen
                 | AiProvider::MiniMax
                 | AiProvider::Ollama
@@ -3118,6 +3134,7 @@ pub async fn stream(
         }
         AiProvider::Openai
         | AiProvider::Deepseek
+        | AiProvider::Kimi
         | AiProvider::Qwen
         | AiProvider::MiniMax
         | AiProvider::Ollama
@@ -5955,6 +5972,30 @@ mod tests {
     }
 
     #[test]
+    fn kimi_provider_uses_openai_compatible_endpoints_and_requires_an_api_key() {
+        let config = AiConfig {
+            provider: AiProvider::Kimi,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://api.moonshot.cn/v1".to_string(),
+            model: "kimi-k2.5".to_string(),
+            ..test_config(AiProvider::Kimi)
+        };
+
+        assert_eq!(resolve_endpoint(&config), "https://api.moonshot.cn/v1/chat/completions");
+        assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.moonshot.cn/v1/models");
+        assert!(provider_requires_api_key(&config.provider));
+        assert_eq!(
+            validate_config(&AiConfig { api_key: String::new(), ..config.clone() }).unwrap_err(),
+            "API key is required"
+        );
+
+        let provider_json = serde_json::to_string(&AiProvider::Kimi).unwrap();
+        assert_eq!(provider_json, r#""kimi""#);
+        assert!(matches!(serde_json::from_str::<AiProvider>(&provider_json).unwrap(), AiProvider::Kimi));
+    }
+
+    #[test]
     fn auto_adds_v1_to_openai_compatible_endpoints() {
         // Endpoint without /v1 — auto add
         let config = AiConfig {
@@ -8112,6 +8153,7 @@ mod tests {
             AiProvider::Custom,
             AiProvider::Gemini,
             AiProvider::Deepseek,
+            AiProvider::Kimi,
             AiProvider::Qwen,
             AiProvider::Ollama,
             AiProvider::MiniMax,
