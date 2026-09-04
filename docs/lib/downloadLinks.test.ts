@@ -36,7 +36,7 @@ test("Windows downloads include standard, offline, and Windows 7 installers", ()
         driverLinkLabel: "数据库离线驱动",
         descriptionSuffix: undefined,
         badge: "内网",
-        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-webview2-offline-setup.exe?v=0.5.82",
+        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-offline-setup.exe?v=0.5.82",
       },
       {
         id: "windows-7-offline",
@@ -46,7 +46,7 @@ test("Windows downloads include standard, offline, and Windows 7 installers", ()
         driverLinkLabel: "数据库离线驱动",
         descriptionSuffix: undefined,
         badge: "旧系统",
-        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-win7-server2012r2-webview2-109-offline-setup.exe?v=0.5.82",
+        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-win7-server2012r2-offline-setup.exe?v=0.5.82",
       },
     ],
   );

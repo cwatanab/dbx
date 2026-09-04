@@ -67,12 +67,9 @@
 
 <table>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/rainyun-dark.png" />
-          <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="雨云" height="48" />
-        </picture>
+        <img src="docs/public/sponsors/rainyun-card.png" alt="雨云" width="175" />
       </a>
     </td>
     <td>
@@ -81,9 +78,9 @@
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://www.qiniu.com/" target="_blank">
-        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="七牛云" height="64" />
+        <img src="docs/public/sponsors/qiniu-card.png" alt="七牛云" width="175" />
       </a>
     </td>
     <td>
@@ -92,12 +89,9 @@
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://easysearch.cn" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/easysearch-dark.png" />
-          <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
-        </picture>
+        <img src="docs/public/sponsors/easysearch-card.png" alt="Easysearch" width="175" />
       </a>
     </td>
     <td>
@@ -106,12 +100,9 @@
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/atlas-dark.svg" />
-          <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
-        </picture>
+        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
       </a>
     </td>
     <td>
@@ -120,12 +111,9 @@
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/trustasia-dark.svg" />
-          <img src="docs/public/sponsors/trustasia.png" alt="TrustAsia" height="44" />
-        </picture>
+        <img src="docs/public/sponsors/trustasia-card.png" alt="TrustAsia" width="175" />
       </a>
     </td>
     <td>

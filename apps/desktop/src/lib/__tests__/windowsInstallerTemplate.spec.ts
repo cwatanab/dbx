@@ -21,11 +21,14 @@ describe("Windows offline installer template", () => {
   it("routes supported legacy Windows users from generic installers to the fixed-runtime package", () => {
     expect(template).toContain("ManifestSupportedOS all");
     expect(template).toContain("!include WinVer.nsh");
-    expect(template).toContain('!if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"');
+    // Tauri 2.11 renders fixedRuntime as an empty NSIS install mode instead of
+    // the literal "fixedRuntime" string.
+    expect(template).toContain('!if "${INSTALLWEBVIEW2MODE}" != ""');
+    expect(template).not.toContain('!if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"');
     expect(template).toContain("${If} ${IsWin7}");
     expect(template).toContain("${OrIf} ${IsWin2012R2}");
     expect(template).toContain('MessageBox MB_ICONSTOP|MB_YESNO|MB_DEFBUTTON1 "$(dbxWin7InstallerRequired)" IDYES dbx_open_win7_installer');
-    expect(template).toContain("https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-webview2-109-offline-setup.exe?v=${VERSION}");
+    expect(template).toContain("https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-offline-setup.exe?v=${VERSION}");
     expect(template).toContain("SetErrorLevel 1633");
     expect(template).toContain("${OrIf} $PassiveMode = 1");
   });
@@ -129,10 +132,9 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
   });
 
   it("audits the linked WebView2 loader in the final Win7 binary", () => {
-    expect(win7LoaderAuditScript).toContain('"Failed to find the Web"');
-    expect(win7LoaderAuditScript).toContain('"Failed to find the app"');
-    expect(win7LoaderAuditScript).toContain('"Failed to find an inst"');
-    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find an installed"');
+    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find the app exe path."');
+    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find the WebView2 client dll at:"');
+    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find an installed WebView2 runtime or non-stable Microsoft Edge installation."');
     expect(win7LoaderAuditScript).toContain("GetEncoding(28591)");
     expect(ciWorkflow).toContain("./.github/scripts/assert-webview2-win7-loader.ps1");
     expect(releaseWorkflow).toContain("./.github/scripts/assert-webview2-win7-loader.ps1");

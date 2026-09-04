@@ -1033,6 +1033,7 @@ export interface TreeNode {
   valid?: boolean | null;
   sizeBytes?: number | null;
   xuguTablespace?: XuguTablespaceInfo;
+  xuguDatafile?: XuguDatafileInfo;
   xuguDatafilePath?: string;
   objectCount?: number;
   loadedKeyCount?: number;

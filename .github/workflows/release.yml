@@ -122,14 +122,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # assetNamePattern renames every bundle artifact of a matrix leg, so
+          # it is set only on aarch64 legs (aarch64 -> arm64). x64 legs leave
+          # it empty and keep the default Tauri CLI names (x64.dmg, amd64
+          # deb/rpm/AppImage) used by downloadLinks and package consumers.
           - platform: macos-latest
             target: aarch64-apple-darwin
+            asset_pattern: "DBX_[version]_arm64[setup][ext]"
           - platform: macos-15-intel
             target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            asset_pattern: "DBX_[version]_arm64[setup][ext]"
 
     runs-on: ${{ matrix.platform }}
     env:
@@ -268,6 +274,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
+          # Empty on x64 legs: tauri-action then keeps the default Tauri CLI names.
+          assetNamePattern: ${{ matrix.asset_pattern }}
           args: --target ${{ matrix.target }}
 
       - name: Verify AppImage input methods
@@ -412,6 +420,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
+          # No assetNamePattern: the default Tauri CLI names already produce
+          # DBX_[version]_x64/arm64-setup.exe and keep the _en-US.msi names.
           args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json
 
       - name: Verify Windows bundles
@@ -445,7 +455,7 @@ jobs:
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $arch = "${{ matrix.arch }}"
           $bundleDir = "target/${{ matrix.target }}/release/bundle/nsis"
-          $offlineName = "DBX_${version}_${arch}-webview2-offline-setup.exe"
+          $offlineName = "DBX_${version}_${arch}-offline-setup.exe"
           $before = @{}
 
           if (Test-Path $bundleDir) {
@@ -638,7 +648,7 @@ jobs:
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          $offlineName = "DBX_${version}_x64-win7-server2012r2-webview2-109-offline-setup.exe"
+          $offlineName = "DBX_${version}_x64-win7-server2012r2-offline-setup.exe"
           $checksumName = "${offlineName}.sha256"
           $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
