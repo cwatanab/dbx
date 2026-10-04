@@ -969,6 +969,12 @@ function executeInNewResultTabFromContextMenu() {
   focusEditor();
 }
 
+function explainFromContextMenu() {
+  if (!canExecuteContextSql.value) return;
+  emit("explain");
+  focusEditor();
+}
+
 function exportQueryFromContextMenu(format: "csv" | "xlsx" | "txt") {
   const sql = executableSql.value;
   if (!sql.trim()) return;
@@ -1194,6 +1200,7 @@ function selectSqlLineFromGutter(currentView: EditorViewType, line: { from: numb
 const contextMenuActions: QueryEditorContextMenuActions = {
   executeFromContextMenu,
   executeInNewResultTabFromContextMenu,
+  explainFromContextMenu,
   requestPreviewChanges,
   exportQueryFromContextMenu,
   toggleCommentFromContextMenu,
@@ -1241,6 +1248,8 @@ function getContextMenuState(): QueryEditorContextMenuState {
     contextObjectTarget: contextObjectTarget.value,
     shortcuts: settingsStore.editorSettings.shortcuts,
     expandSelectStar: target ? () => void expandSelectStar(target) : undefined,
+    canExplain: props.canExplain ?? (canExecuteContextSql.value && !props.readOnly && !props.hideExecutionControls),
+    hasContent: (view.value?.state.doc.length ?? 0) > 0,
   };
 }
 
@@ -1387,6 +1396,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.selectAllSelectionOccurrences, selectAllQueryEditorSelectionOccurrences),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.uppercaseSelection, () => convertSelectedSqlCase("upper")),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.lowercaseSelection, () => convertSelectedSqlCase("lower")),
+        ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.toggleCaseSelection, () => convertSelectedSqlCase("toggle")),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.convertNamingStyle, () => convertSelectedNamingStyle()),
         ...binding(shortcuts.toggleLineComment, (view) => codeMirrorRuntime.codeMirrorToggleLineComment?.(view) ?? false),
         ...binding(shortcuts.toggleBlockComment, (view) => {
@@ -1812,7 +1822,7 @@ const completion = useQueryEditorCompletion({
 });
 const { triggerSqlCompletion, shouldTriggerSqlCompletionForPosition, scheduleSqlCompletionStart, consumeSqlCompletionAutoStartSuppression, scheduleDeferredCompletionTrigger, clearDeferredCompletionTrigger } = completion;
 
-const { editorIndentUnit, handleTab, handleEnter, acceptCompletionOrNextSnippetField, acceptSqlServerCompletionOnSpace, clearPendingCompletionEnter, clearPendingCompletionTab } = useQueryEditorCompletionKeys({
+const { editorIndentUnit, handleTab, handleEnter, acceptCompletionOrNextSnippetField, handleSpace, clearPendingCompletionEnter, clearPendingCompletionTab } = useQueryEditorCompletionKeys({
   props,
   settingsStore,
   runtime: codeMirrorRuntime,
@@ -1998,7 +2008,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         initializedRuntime.vimModeComp.of(vimModeExtension(initialSettings.vimModeEnabled)),
         initializedRuntime.defaultKeymapComp.of(defaultKeymapExtension()),
         keymap.of([...searchKeymapWithoutModD(searchKeymap), ...historyKeymap, ...foldKeymapWithoutAllBindings(foldKeymap, initializedRuntime.codeMirrorFoldAll, initializedRuntime.codeMirrorUnfoldAll), ...completionKeymap]),
-        Prec.highest(keymap.of([{ key: "Space", run: acceptSqlServerCompletionOnSpace }])),
+        Prec.highest(keymap.of([{ key: "Space", run: handleSpace }])),
         initializedRuntime.sqlLanguageComp.of(sqlExtensions.buildSqlLanguageExtension()),
         initializedRuntime.sqlSemanticHighlightComp.of(sqlExtensions.buildSqlSemanticHighlightExtension()),
         createSqlUnknownObjectHighlights({
